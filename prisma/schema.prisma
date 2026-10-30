@@ -1,0 +1,99 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Product {
+  id             String      @id @default(cuid())
+  name           String
+  slug           String      @unique
+  description    String
+  originalPrice  Int
+  salePrice      Int
+  category       String
+  size           String
+  condition      String
+  imageUrl       String
+  images         Json        @default("[]")
+  featured       Boolean     @default(false)
+  inStock        Boolean     @default(true)
+  reservedUntil  DateTime?
+  createdAt      DateTime    @default(now())
+  orderItems     OrderItem[]
+
+  @@index([category])
+  @@index([inStock])
+  @@index([featured])
+}
+
+model Order {
+  id               String      @id @default(cuid())
+  reference        String      @unique
+  idempotencyKey   String?     @unique
+  authorizationUrl String?
+  customerName     String
+  customerEmail    String
+  customerPhone    String
+  shippingAddress  String
+  city             String
+  state            String
+  totalAmount      Int
+  status           String      @default("pending")
+  paystackRef      String?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  items            OrderItem[]
+
+  @@index([status])
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  productId String
+  quantity  Int
+  price     Int
+  size      String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id])
+}
+
+model SiteSettings {
+  id                 String   @id @default("default")
+  storeName          String
+  logoUrl            String   @default("")
+  tagline            String
+  heroTitle          String
+  heroSubtitle       String
+  heroImageUrl       String
+  aboutTitle         String
+  aboutText          String
+  contactEmail       String
+  contactAddress     String
+  customerCarePhone  String
+  customerCareHours  String
+  instagramUrl       String   @default("")
+  tiktokUrl          String   @default("")
+  whatsappNumber     String   @default("")
+  colorCream         String   @default("#F7F3EE")
+  colorSand          String   @default("#E8DFD4")
+  colorTerracotta    String   @default("#C45C3E")
+  colorRust          String   @default("#9E3F2A")
+  colorOlive         String   @default("#5C6B4A")
+  colorCharcoal      String   @default("#2C2825")
+  colorWarmgray      String   @default("#6B6560")
+  updatedAt          DateTime @updatedAt
+}
+
+/// Browsers/phones that opted in to new-arrival notifications.
+model PushSubscription {
+  id        String   @id @default(cuid())
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+}
