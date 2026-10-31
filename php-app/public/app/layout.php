@@ -36,6 +36,7 @@ function product_card(array $p): string
     } else {
         if (is_new_arrival($p)) $badges .= '<span class="rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-terracotta shadow-sm">New</span>';
         if ($p['featured']) $badges .= '<span class="rounded-full bg-terracotta px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-white">Drop</span>';
+        if (effective_price($p) < (int) $p['salePrice']) $badges .= '<span class="rounded-full bg-olive px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-white">Flash sale</span>';
         $badges .= '<span class="rounded-full bg-charcoal/80 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-cream">1 of 1</span>';
     }
     $meta = trim((string) ($p['brand'] ?? '')) !== '' ? $p['brand'] : $p['category'];
@@ -48,10 +49,12 @@ function product_card(array $p): string
         . '<p class="text-xs uppercase tracking-wide text-warmgray">' . e($meta) . '</p>'
         . '<h3 class="mt-1 font-display text-lg leading-tight text-charcoal">' . e($p['name']) . '</h3>'
         . '<div class="mt-auto flex items-end justify-between gap-2 pt-3">'
-        . price_html((int) $p['originalPrice'], (int) $p['salePrice'], 'sm')
+        . price_html((int) $p['originalPrice'], $sold ? (int) $p['salePrice'] : effective_price($p), 'sm')
         . '<span class="shrink-0 text-xs text-warmgray">Size ' . e($p['size']) . '</span>'
         . '</div></div></a>'
-        . wish_button($p['id'], 'absolute right-3 top-3') . '</div>';
+        . wish_button($p['id'], 'absolute right-3 top-3')
+        . ($sold ? '' : '<button type="button" data-quick-view="' . e($p['slug']) . '" class="absolute bottom-[5.5rem] left-1/2 hidden -translate-x-1/2 rounded-full bg-white/95 px-4 py-1.5 text-xs font-semibold text-charcoal shadow-sm hover:bg-white sm:block">Quick view</button>')
+        . '</div>';
 }
 
 /** Heart toggle. The list is kept in the shopper's browser (assets/app.js). */
@@ -61,15 +64,16 @@ function wish_button(string $id, string $class = ''): string
         . icon('heart', 'h-4 w-4') . '</button>';
 }
 
-function email_signup(string $variant = 'dark', string $category = ''): string
+function email_signup(string $variant = 'dark', string $category = '', bool $birthday = false): string
 {
     $dark = $variant === 'dark';
     $id = 'sub-' . $variant . $category;
-    return '<form data-subscribe class="flex max-w-sm gap-2"' . ($category ? ' data-category="' . e($category) . '"' : '') . '>'
+    return '<form data-subscribe class="flex max-w-sm flex-wrap gap-2"' . ($category ? ' data-category="' . e($category) . '"' : '') . '>'
         . '<label class="sr-only" for="' . e($id) . '">Email</label>'
         . '<input id="' . e($id) . '" type="email" required placeholder="Your email" class="min-w-0 flex-1 rounded-full border px-4 py-2 text-sm focus:outline-none '
         . ($dark ? 'border-sand/30 bg-white/10 text-cream placeholder:text-sand/60 focus:border-cream' : 'border-sand bg-white text-charcoal focus:border-terracotta') . '">'
         . '<button type="submit" class="shrink-0 rounded-full bg-terracotta px-4 py-2 text-sm font-semibold text-cream hover:bg-rust">' . ($category ? 'Notify me' : 'Join') . '</button>'
+        . ($birthday ? '<label class="flex w-full items-center gap-2 text-xs ' . ($dark ? 'text-sand/80' : 'text-warmgray') . '">Birthday (optional, for a treat) <input type="date" name="birthday" class="rounded-lg border border-sand bg-white px-2 py-1 text-xs text-charcoal"></label>' : '')
         . '</form><p data-subscribe-msg class="mt-2 hidden text-xs ' . ($dark ? 'text-sand/80' : 'text-warmgray') . '"></p>';
 }
 
@@ -118,7 +122,7 @@ function render_store(string $content, array $meta = []): void
     $image = absolute_url((string) ($meta['image'] ?? $s['heroImageUrl']));
     $canonical = app_url() . (parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/');
     $hasLogo = trim($s['logoUrl']) !== '';
-    $nav = ['/shop' => 'Shop', '/shop?category=featured' => 'New Drops', '/track' => 'Track order', '/contact' => 'Contact'];
+    $nav = ['/shop' => 'Shop', '/shop?category=featured' => 'New Drops', '/looks' => 'Looks', '/track' => 'Track order', '/contact' => 'Contact'];
 
     $navLinks = '';
     $mobileLinks = '';
@@ -183,6 +187,7 @@ function render_store(string $content, array $meta = []): void
 <body class="min-h-screen font-sans antialiased" style="<?= e(theme_style($s)) ?>">
 <div class="flex min-h-screen flex-col bg-cream text-charcoal" id="store" data-store="<?= $storeJson ?>">
 <?= $newBar ?>
+<?php if (flash_active()): ?><div class="bg-olive text-white" data-countdown="<?= (int) $s['flashEndsAt'] ?>" data-countdown-soft><div class="mx-auto flex max-w-6xl flex-wrap items-center justify-center gap-x-3 px-4 py-2 text-sm"><span class="font-semibold">⚡ Flash sale: <?= (int) $s['flashPct'] ?>% off <?= $s['flashCategory'] ? e(CATEGORIES[$s['flashCategory']] ?? '') : 'everything' ?></span><span>Ends in <span data-countdown-text class="font-semibold tabular-nums"></span></span><a href="/shop<?= $s['flashCategory'] ? '?category=' . e($s['flashCategory']) : '' ?>" class="underline">Shop now</a></div></div><?php endif; ?>
 <header class="sticky top-0 z-50 border-b border-sand/80 bg-cream/95 backdrop-blur-md">
   <div class="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:px-6 sm:py-4">
     <a href="/" class="flex min-w-0 shrink items-center gap-2" aria-label="<?= e($s['storeName']) ?>"><?= $brand ?></a>
@@ -226,6 +231,11 @@ function render_store(string $content, array $meta = []): void
           <li><a href="/wishlist" class="hover:text-terracotta">Wishlist</a></li>
           <li><a href="/track" class="hover:text-terracotta">Track your order</a></li>
           <li><a href="/sell" class="hover:text-terracotta">Sell to us</a></li>
+          <li><a href="/request" class="hover:text-terracotta">Find me a piece</a></li>
+          <li><a href="/quiz" class="hover:text-terracotta">Style quiz</a></li>
+          <li><a href="/blog" class="hover:text-terracotta">Style notes (blog)</a></li>
+          <li><a href="/top-buyers" class="hover:text-terracotta">Top thrifters</a></li>
+          <li><a href="/wholesale" class="hover:text-terracotta">Wholesale</a></li>
           <li><a href="/size-guide" class="hover:text-terracotta">Size guide</a></li>
           <li><a href="/returns" class="hover:text-terracotta">Returns &amp; refunds</a></li>
         </ul>
@@ -240,6 +250,7 @@ function render_store(string $content, array $meta = []): void
   </div>
 </footer>
 <?= chat_widget_html($s) ?>
+<div id="quick-view" class="fixed inset-0 z-[70] hidden items-center justify-center bg-charcoal/70 p-4" role="dialog" aria-modal="true" aria-label="Quick view"><div data-qv-body class="relative max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-cream p-5"></div></div>
 </div>
 <script src="/assets/app.js?v=<?= ASSET_VERSION ?>"></script>
 </body>

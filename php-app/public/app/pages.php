@@ -9,6 +9,7 @@ function page_home(): void
     $featured = fetch_products('featured = 1 AND ' . available_sql(), [], 'ORDER BY createdAt DESC LIMIT 4');
     $nextDrop = next_drop_at();
     $reviews = db()->query('SELECT * FROM Review WHERE approved = 1 ORDER BY createdAt DESC LIMIT 6')->fetchAll();
+    $spot = db()->query('SELECT * FROM Review WHERE featured = 1 AND approved = 1 LIMIT 1')->fetch();
 
     $perks = [
         ['sparkles', 'Curated picks', 'Every piece hand-selected — no bulk warehouse vibes.'],
@@ -82,6 +83,12 @@ function page_home(): void
     <p data-review-msg class="hidden text-sm"></p>
     <button type="submit" class="<?= btn_class() ?>">Submit review</button>
   </form>
+  <?php if ($spot): ?>
+  <div class="mt-8 grid items-center gap-6 rounded-2xl bg-terracotta p-6 text-cream sm:grid-cols-[200px_1fr] sm:p-8">
+    <?php if ($spot['photoUrl']): ?><img src="<?= e($spot['photoUrl']) ?>" alt="<?= e($spot['name']) ?>" class="aspect-square w-full rounded-xl object-cover"><?php endif; ?>
+    <div><p class="text-xs font-semibold uppercase tracking-wider text-cream/80">Customer of the month</p><p class="mt-2 font-display text-2xl"><?= e($spot['name']) ?></p><blockquote class="mt-3 text-cream/90">“<?= e($spot['body']) ?>”</blockquote></div>
+  </div>
+  <?php endif; ?>
   <?= $reviewHtml ? '<div class="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">' . $reviewHtml . '</div>' : '<p class="mt-8 text-warmgray">Be the first to share your find!</p>' ?>
 </section>
 <section id="about" class="mx-auto max-w-6xl px-4 pb-16 sm:px-6">
@@ -94,7 +101,7 @@ function page_home(): void
         <a href="/shop" class="<?= btn_class() ?>">Start shopping</a>
         <a href="<?= e(tel_link($s['customerCarePhone'])) ?>" class="<?= btn_class('outline') ?>">Call <?= e($s['customerCarePhone']) ?></a>
       </div>
-      <div class="mt-10 rounded-2xl bg-sand/50 p-5"><p class="font-semibold">Never miss a drop</p><p class="mt-1 text-sm text-warmgray">We&apos;ll email you when new pieces land.</p><div class="mt-3"><?= email_signup('light') ?></div></div>
+      <div class="mt-10 rounded-2xl bg-sand/50 p-5"><p class="font-semibold">Never miss a drop</p><p class="mt-1 text-sm text-warmgray">We&apos;ll email you when new pieces land.</p><div class="mt-3"><?= email_signup('light', '', true) ?></div></div>
     </div>
   </div>
 </section>
@@ -122,6 +129,7 @@ function page_shop(): void
     $search = mb_substr(trim((string) ($_GET['q'] ?? '')), 0, 80);
     $era = in_array($_GET['era'] ?? '', ERAS, true) ? $_GET['era'] : '';
     $tag = isset(PRODUCT_TAGS[$_GET['tag'] ?? '']) ? $_GET['tag'] : '';
+    $size = mb_substr(trim((string) ($_GET['size'] ?? '')), 0, 40);
 
     // Sold pieces stay visible (marked "Sold") so the shop looks active; available pieces come first.
     $where = published_sql() . ($showSold ? '' : ' AND inStock = 1');
@@ -136,6 +144,7 @@ function page_shop(): void
         array_push($params, $like, $like, $like, $like, $like);
     }
     if ($era !== '') { $where .= ' AND era = ?'; $params[] = $era; }
+    if ($size !== '') { $where .= ' AND size = ? COLLATE NOCASE'; $params[] = $size; }
     if ($tag !== '') { $where .= " AND (',' || tags || ',') LIKE ?"; $params[] = '%,' . $tag . ',%'; }
     if ($min > 0) { $where .= ' AND salePrice >= ?'; $params[] = $min * 100; }
     if ($max > 0) { $where .= ' AND salePrice <= ?'; $params[] = $max * 100; }
@@ -145,7 +154,7 @@ function page_shop(): void
     $products = fetch_products($where, $params, $order . ' LIMIT ' . $pageSize . ' OFFSET ' . (($page - 1) * $pageSize));
     $totalPages = max(1, (int) ceil($total / $pageSize));
 
-    $query = array_filter(['q' => $search, 'era' => $era, 'tag' => $tag, 'brand' => $brand, 'color' => $color, 'sort' => $sort === 'new' ? '' : $sort, 'min' => $min ?: '', 'max' => $max ?: '', 'sold' => $showSold ? '' : '0'], fn($v) => $v !== '');
+    $query = array_filter(['size' => $size, 'q' => $search, 'era' => $era, 'tag' => $tag, 'brand' => $brand, 'color' => $color, 'sort' => $sort === 'new' ? '' : $sort, 'min' => $min ?: '', 'max' => $max ?: '', 'sold' => $showSold ? '' : '0'], fn($v) => $v !== '');
     $href = function (array $over) use ($category, $query): string {
         $q = array_filter(array_merge($category !== 'all' ? ['category' => $category] : [], $query, $over), fn($v) => $v !== '' && $v !== null);
         return $q ? '/shop?' . http_build_query($q) : '/shop';
@@ -168,12 +177,13 @@ function page_shop(): void
     };
     $brands = distinct_values('brand');
     $colors = distinct_values('color');
-    $filters = '<form method="get" action="/shop" class="mt-6 flex flex-wrap items-end gap-3 rounded-2xl bg-white p-4 ring-1 ring-sand/60" data-autosubmit>'
+    $filters = '<form method="get" action="/shop" data-size-memory class="mt-6 flex flex-wrap items-end gap-3 rounded-2xl bg-white p-4 ring-1 ring-sand/60" data-autosubmit>'
         . ($category !== 'all' ? '<input type="hidden" name="category" value="' . e($category) . '">' : '')
         . '<label class="flex flex-col text-xs font-medium text-warmgray">Search<input name="q" type="search" value="' . e($search) . '" placeholder="Denim, Nike, red…" class="mt-1 w-44 rounded-xl border border-sand px-3 py-2 text-sm text-charcoal"></label>'
         . $select('sort', 'Sort', SHOP_SORTS, $sort)
         . $select('era', 'Era', ['' => 'Any era'] + array_combine(ERAS, ERAS), $era)
         . $select('tag', 'Type', ['' => 'All pieces'] + PRODUCT_TAGS, $tag)
+        . (($sizes = distinct_values('size')) ? $select('size', 'Size', ['' => 'All sizes'] + array_combine($sizes, $sizes), $size) : '')
         . ($brands ? $select('brand', 'Brand', ['' => 'All brands'] + array_combine($brands, $brands), $brand) : '')
         . ($colors ? $select('color', 'Colour', ['' => 'All colours'] + array_combine($colors, $colors), $color) : '')
         . '<label class="flex flex-col text-xs font-medium text-warmgray">Min ₦<input name="min" type="number" min="0" step="500" value="' . ($min ?: '') . '" class="mt-1 w-28 rounded-xl border border-sand px-3 py-2 text-sm text-charcoal"></label>'
@@ -215,6 +225,8 @@ function page_product(string $slug): void
     $s = settings();
     $images = product_images($p);
     $similar = fetch_products('category = ? AND id != ? AND ' . available_sql(), [$p['category'], $p['id']], 'ORDER BY createdAt DESC LIMIT 4');
+    $price = $availability === 'available' ? effective_price($p) : (int) $p['salePrice'];
+    $viewing = $availability === 'available' ? record_view_and_count($p['id']) : 0;
 
     $badge = match ($availability) {
         'sold' => '<span class="rounded-full bg-rust/10 px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide text-rust">Sold</span>',
@@ -243,13 +255,13 @@ function page_product(string $slug): void
             . '<div class="mt-6 rounded-2xl bg-sand/50 p-5"><p class="font-semibold">Missed this one?</p><p class="mt-1 text-sm text-warmgray">Get an email when similar ' . e(CATEGORIES[$p['category']] ?? 'pieces') . ' arrive.</p><div class="mt-3">' . email_signup('light', $p['category']) . '</div></div>';
     } elseif ($availability === 'reserved') {
         $cta = '<button disabled class="' . btn_class('outline', true) . '">Reserved — checkout in progress</button>'
-            . '<p class="mt-2 text-center text-xs text-warmgray">Someone&apos;s completing checkout on this piece. Check back soon — it&apos;ll reopen if their payment doesn&apos;t go through.</p>';
+            . '<p class="mt-2 text-center text-xs text-warmgray" data-countdown="' . (int) $p['reservedUntil'] . '" data-countdown-soft>Someone&apos;s completing checkout on this piece. If their payment doesn&apos;t go through it reopens in <strong data-countdown-text class="tabular-nums"></strong>.</p>';
     } elseif ($availability === 'scheduled') {
         $cta = '<p class="rounded-xl bg-sand/60 p-4 text-sm">Goes live ' . e(date('D j M Y, g:ia', intdiv((int) $p['publishAt'], 1000))) . '. Shoppers can&apos;t see it yet.</p>';
     } else {
         $data = e(json_encode([
             'productId' => $p['id'], 'name' => $p['name'], 'slug' => $p['slug'],
-            'salePrice' => (int) $p['salePrice'], 'originalPrice' => (int) $p['originalPrice'],
+            'salePrice' => $price, 'originalPrice' => (int) $p['originalPrice'],
             'imageUrl' => $p['imageUrl'], 'size' => $p['size'],
         ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
         $cta = '<button type="button" data-add-to-cart="' . $data . '" class="' . btn_class('primary', true) . '">Add to cart</button>' . $waBtn;
@@ -287,6 +299,7 @@ function page_product(string $slug): void
         <?= wish_button($p['id'], 'absolute right-3 top-3') ?>
       </div>
       <?= $thumbs ?>
+      <?php if ($p['videoUrl'] !== ''): ?><video src="<?= e($p['videoUrl']) ?>" controls playsinline preload="metadata" class="mt-3 w-full rounded-2xl bg-charcoal"></video><?php endif; ?>
       <?php if (count($images) > 1): ?><p class="mt-2 text-xs text-warmgray">Tap a photo to zoom in — close-ups show any wear honestly.</p><?php endif; ?>
       <div data-lightbox class="fixed inset-0 z-[60] hidden items-center justify-center bg-charcoal/95 p-4" role="dialog" aria-modal="true" aria-label="<?= e($p['name']) ?> — enlarged photo">
         <button type="button" data-close class="absolute right-4 top-4 rounded-full bg-white/10 p-2 text-cream hover:bg-white/20" aria-label="Close enlarged photo"><?= icon('x', 'h-5 w-5') ?></button>
@@ -296,7 +309,9 @@ function page_product(string $slug): void
     <div class="flex flex-col">
       <div class="flex flex-wrap items-center gap-3"><p class="text-sm uppercase tracking-wide text-warmgray"><?= e($p['category']) ?></p><?= $badge ?></div>
       <h1 class="mt-2 font-display text-3xl font-semibold sm:text-4xl"><?= e($p['name']) ?></h1>
-      <div class="mt-4"><?= price_html((int) $p['originalPrice'], (int) $p['salePrice'], 'lg') ?></div>
+      <div class="mt-4"><?= price_html((int) $p['originalPrice'], $price, 'lg') ?></div>
+      <?php if ($price < (int) $p['salePrice']): ?><p class="mt-1 text-sm font-semibold text-olive">⚡ Flash sale price — was <?= naira((int) $p['salePrice']) ?></p><?php endif; ?>
+      <?php if ($viewing >= 2): ?><p class="mt-2 text-sm text-rust">👀 <?= $viewing ?> people are looking at this right now</p><?php endif; ?>
       <dl class="mt-6 grid grid-cols-2 gap-4 rounded-xl bg-white p-4 ring-1 ring-sand/60"><?= $dl ?></dl>
       <?php if ($p['tags'] !== ''): ?><div class="mt-4 flex flex-wrap gap-2"><?php foreach (explode(',', $p['tags']) as $t): if (isset(PRODUCT_TAGS[$t])): ?><a href="/shop?tag=<?= e($t) ?>" class="rounded-full bg-terracotta/10 px-3 py-1 text-xs font-semibold text-terracotta"><?= e(PRODUCT_TAGS[$t]) ?></a><?php endif; endforeach; ?></div><?php endif; ?>
       <?php if (trim($p['fit']) !== '' || trim($p['modelInfo']) !== ''): ?>
@@ -314,8 +329,14 @@ function page_product(string $slug): void
       <p class="mt-6 whitespace-pre-line leading-relaxed text-warmgray"><?= e($p['description']) ?></p>
       <p class="mt-4 text-sm text-warmgray">One-of-one thrift piece. Delivery across Nigeria — fee shown at checkout. <a href="/size-guide" class="underline">Size guide</a> · <a href="/returns" class="underline">Returns</a></p>
       <div class="mt-8"><?= $cta ?></div>
+      <?php if ($availability === 'available'): ?>
+      <form data-price-watch="<?= e($p['id']) ?>" class="mt-4 flex flex-wrap items-center gap-2 text-sm"><label for="pw-<?= e($p['id']) ?>" class="text-warmgray">Waiting for a lower price?</label>
+        <input id="pw-<?= e($p['id']) ?>" type="email" required placeholder="Your email" class="min-w-0 flex-1 rounded-full border border-sand bg-white px-3 py-1.5 text-sm focus:border-terracotta focus:outline-none">
+        <button type="submit" class="rounded-full border border-charcoal px-3 py-1.5 text-xs font-semibold hover:bg-charcoal hover:text-cream">Alert me</button><p data-pw-msg class="hidden w-full text-xs"></p></form>
+      <?php endif; ?>
     </div>
   </div>
+  <?= complete_the_look($p['id']) ?>
   <?php if ($similar): ?>
   <div class="mt-16"><h2 class="font-display text-2xl font-semibold">You might also like</h2><?= product_grid($similar) ?></div>
   <?php endif; ?>
@@ -325,7 +346,7 @@ function page_product(string $slug): void
         'title' => $p['name'],
         'description' => mb_substr($p['description'], 0, 160) ?: $p['name'],
         'image' => $p['imageUrl'],
-        'price' => (int) $p['salePrice'],
+        'price' => $price,
     ]);
 }
 
@@ -343,7 +364,7 @@ function page_checkout(): void
     foreach (NG_STATES as $st) $opts .= '<option value="' . e($st) . '">' . e($st) . '</option>';
     $input = 'mt-1 w-full rounded-xl border border-sand bg-white px-4 py-3 text-sm focus:border-terracotta focus:outline-none focus:ring-1 focus:ring-terracotta';
 
-    $methods = ['paystack' => ['Pay online with Paystack', 'Card, bank or USSD. Instant confirmation.']];
+    $methods = ['paystack' => ['Pay online with Paystack', 'Card, bank transfer or USSD (e.g. GTBank *737#, First Bank *894#, Access *901#, Zenith *966#, UBA *919#). Instant confirmation.']];
     if (trim($s['bankDetails']) !== '') $methods['transfer'] = ['Bank transfer', 'We show our account details after you order. Items held for 48 hours.'];
     if ($s['payOnDelivery']) $methods['pod'] = ['Pay on delivery', 'Pay the rider in cash or by transfer when your order arrives.'];
     $methodHtml = '';
@@ -386,6 +407,9 @@ function page_checkout(): void
         <?php if ((int) $s['giftWrapPrice'] > 0): ?>
         <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="giftWrap" value="1" class="accent-terracotta"> 🎁 Gift wrap (+<?= naira((int) $s['giftWrapPrice'] * 100) ?>)</label>
         <?php endif; ?>
+        <div><label for="tip" class="block text-sm font-medium">Support a small business (optional tip)</label>
+          <select id="tip" name="tip" class="<?= $input ?>"><option value="0">No tip</option><option value="500">₦500</option><option value="1000">₦1,000</option><option value="2000">₦2,000</option><option value="5000">₦5,000</option></select></div>
+        <label class="flex items-center gap-2 text-xs text-warmgray"><input type="checkbox" name="leaderboard" value="1"> Show my first name on the <a href="/top-buyers" class="underline">Top thrifters</a> board</label>
         <label class="flex items-center gap-2 text-xs text-warmgray"><input type="checkbox" id="remember-details" checked> Remember my details on this device</label>
         <h2 class="pt-4 font-display text-lg font-semibold">Payment</h2>
         <div class="space-y-3"><?= $methodHtml ?></div>
@@ -404,8 +428,12 @@ function page_checkout(): void
           <div class="flex justify-between"><dt class="text-warmgray">Delivery</dt><dd id="checkout-delivery" class="text-warmgray">Select your state</dd></div>
           <div id="checkout-discount-row" class="hidden justify-between text-olive"><dt>Discount</dt><dd id="checkout-discount"></dd></div>
           <div id="checkout-wrap-row" class="hidden justify-between"><dt class="text-warmgray">Gift wrap</dt><dd id="checkout-wrap"></dd></div>
+          <div id="checkout-bundle-row" class="hidden justify-between text-olive"><dt>Bundle deal</dt><dd id="checkout-bundle"></dd></div>
+          <div id="checkout-tip-row" class="hidden justify-between"><dt class="text-warmgray">Tip</dt><dd id="checkout-tip"></dd></div>
         </dl>
         <div class="mt-4 flex justify-between border-t border-sand pt-4 font-semibold"><span>Total</span><span id="checkout-total" class="text-terracotta"></span></div>
+        <p id="checkout-gift" class="mt-3 hidden rounded-lg bg-olive/10 px-3 py-2 text-sm text-olive"></p>
+        <?php if ((int) $s['bundleMin'] >= 2 && (int) $s['bundlePct'] > 0): ?><p class="mt-3 text-xs text-warmgray">Bundle deal: buy <?= (int) $s['bundleMin'] ?>+ pieces, get <?= (int) $s['bundlePct'] ?>% off.</p><?php endif; ?>
         <p id="checkout-unavailable" class="mt-4 hidden items-start gap-2 rounded-lg bg-rust/10 px-3 py-2 text-sm text-rust"><?= icon('alert', 'mt-0.5 h-4 w-4 shrink-0') ?> Some items in your cart just sold or are being purchased by someone else. Remove them to continue.</p>
         <p id="checkout-error" class="mt-4 hidden rounded-lg bg-rust/10 px-3 py-2 text-sm text-rust"></p>
         <p class="mt-4 text-xs text-warmgray">By ordering you agree to our <a href="/terms" class="underline">terms</a> and <a href="/returns" class="underline">returns policy</a>.</p>
@@ -510,6 +538,9 @@ function sitemap_xml(): void
     $urls = [['/', null], ['/shop', null], ['/contact', null]];
     foreach (CATEGORIES as $id => $_) if ($id !== 'all') $urls[] = ['/shop?category=' . $id, null];
     foreach (fetch_products(published_sql()) as $p) $urls[] = ['/product/' . rawurlencode($p['slug']), (int) ($p['soldAt'] ?: $p['createdAt'])];
+    foreach (['/looks', '/blog', '/returns', '/size-guide', '/sell', '/quiz'] as $u) $urls[] = [$u, null];
+    foreach (db()->query('SELECT slug, createdAt FROM Post WHERE published = 1')->fetchAll() as $po) $urls[] = ['/blog/' . rawurlencode($po['slug']), (int) $po['createdAt']];
+    foreach (db()->query('SELECT slug, createdAt FROM Outfit')->fetchAll() as $ou) $urls[] = ['/looks/' . rawurlencode($ou['slug']), (int) $ou['createdAt']];
     echo '<?xml version="1.0" encoding="UTF-8"?>' . "\n" . '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">';
     foreach ($urls as [$u, $ts]) {
         echo '<url><loc>' . e($base . $u) . '</loc>' . ($ts ? '<lastmod>' . date('Y-m-d', intdiv($ts, 1000)) . '</lastmod>' : '') . '</url>';
@@ -537,7 +568,7 @@ function product_feed_csv(): void
             product_availability($p) === 'available' ? 'in stock' : 'out of stock',
             $p['condition'] === 'New with tags' ? 'new' : 'used',
             number_format((int) $p['originalPrice'] / 100, 2, '.', '') . ' NGN',
-            (int) $p['salePrice'] < (int) $p['originalPrice'] ? number_format((int) $p['salePrice'] / 100, 2, '.', '') . ' NGN' : '',
+            effective_price($p) < (int) $p['originalPrice'] ? number_format(effective_price($p) / 100, 2, '.', '') . ' NGN' : '',
             app_url() . '/product/' . rawurlencode($p['slug']), $imgs[0] ?? '', implode(',', array_slice($imgs, 1, 10)),
             $p['brand'] ?: $s['storeName'], $p['color'], $p['size'], 'Apparel & Accessories > Clothing',
         ]);

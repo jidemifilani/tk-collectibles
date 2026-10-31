@@ -4,8 +4,8 @@
  * discount codes, email, admin activity log, 2-step login (TOTP), and scheduled drops.
  */
 
-const SCHEMA_VERSION = 3;
-const PRODUCT_TAGS = ['rare' => 'Rare find', 'vintage' => 'Vintage'];
+const SCHEMA_VERSION = 4;
+const PRODUCT_TAGS = ['rare' => 'Rare find', 'vintage' => 'Vintage', 'mystery' => 'Mystery bundle'];
 const ERAS = ['70s', '80s', '90s', 'Y2K', '2010s', 'Modern'];
 
 /** Adds new columns/tables once. PRAGMA user_version records what has already run. */
@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS "SellRequest" (
 );
 SQL);
     }
+    if ($version < 4) migrate_v4($pdo, $add);
     $pdo->exec('PRAGMA user_version = ' . SCHEMA_VERSION);
 }
 
@@ -172,6 +173,10 @@ function order_summary_html(array $o): string
     }
     if ((int) $o['deliveryFee'] > 0) $rows .= '<tr><td>Delivery</td><td style="text-align:right">' . naira((int) $o['deliveryFee']) . '</td></tr>';
     if ((int) $o['discountAmount'] > 0) $rows .= '<tr><td>Discount (' . e($o['discountCode']) . ')</td><td style="text-align:right">−' . naira((int) $o['discountAmount']) . '</td></tr>';
+    if ((int) ($o['bundleDiscount'] ?? 0) > 0) $rows .= '<tr><td>Bundle deal</td><td style="text-align:right">−' . naira((int) $o['bundleDiscount']) . '</td></tr>';
+    if ((int) ($o['giftWrapFee'] ?? 0) > 0) $rows .= '<tr><td>Gift wrap</td><td style="text-align:right">' . naira((int) $o['giftWrapFee']) . '</td></tr>';
+    if ((int) ($o['tip'] ?? 0) > 0) $rows .= '<tr><td>Tip — thank you!</td><td style="text-align:right">' . naira((int) $o['tip']) . '</td></tr>';
+    if (($o['freeGift'] ?? '') !== '') $rows .= '<tr><td colspan="2">🎁 Free gift: ' . e($o['freeGift']) . '</td></tr>';
     $rows .= '<tr><td style="font-weight:bold;padding-top:8px">Total</td><td style="text-align:right;font-weight:bold">' . naira((int) $o['totalAmount']) . '</td></tr>';
     return '<p>Order reference: <strong>' . e($o['reference']) . '</strong></p><table style="width:100%;border-collapse:collapse">' . $rows . '</table>'
         . '<p>Track your order any time: <a href="' . e(app_url() . '/track?ref=' . urlencode($o['reference'])) . '">' . e(app_url()) . '/track</a></p>';
@@ -202,7 +207,10 @@ function notify_order(array $o, string $event): void
     } else {
         $label = FULFILLMENT_LABELS[$o['fulfillment']] ?? $o['status'];
         send_mail($o['customerEmail'], 'Order ' . $o['reference'] . ': ' . $label,
-            "<p>Hi $name, your order is now: <strong>" . e($label) . '</strong>.</p>' . order_summary_html($o));
+            "<p>Hi $name, your order is now: <strong>" . e($label) . '</strong>.</p>'
+            . (($o['riderName'] ?? '') !== '' ? '<p>Rider: ' . e($o['riderName']) . ' · ' . e($o['riderPhone']) . '</p>' : '')
+            . (($o['trackingUrl'] ?? '') !== '' ? '<p><a href="' . e($o['trackingUrl']) . '">Track the delivery</a></p>' : '')
+            . order_summary_html($o));
     }
 }
 
@@ -425,6 +433,8 @@ function run_maintenance(): void
         if (filter_var($s['contactEmail'], FILTER_VALIDATE_EMAIL)) send_mail($s['contactEmail'], 'Daily summary — ' . date('j M'), '<p>' . nl2br(e($text)) . '</p><p><a href="' . e(app_url() . admin_base()) . '">Open admin</a></p>');
         telegram_alert("📊 " . $text);
     }
+
+    run_maintenance_extra();
 }
 
 // ---------- default policy texts (shown until the owner edits them in Settings) ----------
@@ -441,3 +451,5 @@ function policy_text(string $key): string
     $v = trim((string) (settings()[$key] ?? ''));
     return $v !== '' ? $v : DEFAULT_POLICIES[$key];
 }
+
+require_once __DIR__ . '/promo.php';

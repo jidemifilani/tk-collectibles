@@ -72,6 +72,7 @@ function admin_reviews_page(): void
             . '<div class="mt-3 flex gap-2">'
             . '<button type="button" data-review-save="1" class="rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-medium text-white">' . ($r['approved'] ? 'Save' : 'Approve') . '</button>'
             . ($r['approved'] ? '<button type="button" data-review-save="0" class="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium">Hide</button>' : '')
+            . '<button type="button" data-review-feature class="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium">' . ($r['featured'] ? '★ Customer of the month' : 'Make customer of the month') . '</button>'
             . '<button type="button" data-review-delete class="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700">Delete</button></div></div>';
     }
     $content = '<h1 class="text-2xl font-semibold">Reviews</h1><p class="mt-1 text-gray-500">Shoppers submit reviews from the homepage. Approve the good ones and add a photo of them wearing their find.</p>'
@@ -128,7 +129,8 @@ function admin_security_page(): void
         . '<li>✓ Secure cookies (HTTPS-only, not readable by scripts, not sent from other sites)</li>'
         . '<li>✓ Content-Security-Policy and anti-framing headers on every page</li>'
         . '<li>' . ($hidden ? '✓ Admin panel is at a hidden address — the old /admin link shows “not found”' : '• Admin panel is at /admin. Set ADMIN_PATH in config.php to hide it') . '</li></ul>'
-        . '<a href="/api/admin/backup" class="mt-4 inline-flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium hover:bg-gray-50">' . icon('download') . 'Download database backup</a></section>';
+        . '<a href="/api/admin/backup" class="mt-4 inline-flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium hover:bg-gray-50">' . icon('download') . 'Download database backup</a></section>'
+        . admin_staff_section();
     render_admin($content, 'Security');
 }
 
@@ -164,7 +166,8 @@ function admin_sell_page(): void
         foreach (json_decode($r['photos'], true) ?: [] as $ph) $photos .= '<a href="' . e($ph) . '" target="_blank"><img src="' . e($ph) . '" alt="" class="h-20 w-20 rounded object-cover"></a>';
         $opts = '';
         foreach (['new' => 'New', 'contacted' => 'Contacted', 'bought' => 'Bought', 'declined' => 'Declined'] as $k => $l) $opts .= '<option value="' . $k . '"' . ($r['status'] === $k ? ' selected' : '') . '>' . $l . '</option>';
-        $cards .= '<div class="rounded-xl border border-gray-200 bg-white p-5"><div class="flex flex-wrap items-center justify-between gap-2"><p class="font-semibold">' . e($r['name']) . ' · ' . e($r['phone']) . ($r['email'] ? ' · ' . e($r['email']) : '') . '</p>'
+        $kindLabel = ['sell' => 'Wants to sell', 'wholesale' => 'Wholesale', 'request' => 'Find me a piece'][$r['kind'] ?? 'sell'] ?? 'Sell';
+        $cards .= '<div class="rounded-xl border border-gray-200 bg-white p-5"><div class="flex flex-wrap items-center justify-between gap-2"><p class="font-semibold"><span class="mr-2 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium">' . $kindLabel . '</span>' . e($r['name']) . ' · ' . e($r['phone']) . ($r['email'] ? ' · ' . e($r['email']) : '') . '</p>'
             . '<select data-sell-status="' . e($r['id']) . '" class="rounded-lg border border-gray-300 px-2 py-1 text-xs">' . $opts . '</select></div>'
             . '<p class="mt-2 whitespace-pre-line text-sm text-gray-700">' . e($r['description']) . '</p>'
             . ((int) $r['askingPrice'] ? '<p class="mt-1 text-sm">Asking: <strong>' . naira((int) $r['askingPrice']) . '</strong></p>' : '')
@@ -172,7 +175,7 @@ function admin_sell_page(): void
             . '<div class="mt-3 flex gap-2 text-xs text-gray-400">' . e(date('j M Y, g:ia', intdiv((int) $r['createdAt'], 1000)))
             . ' · <a href="' . e(whatsapp_link($r['phone'])) . '" target="_blank" rel="noopener noreferrer" class="text-blue-600 underline">WhatsApp them</a></div></div>';
     }
-    render_admin('<h1 class="text-2xl font-semibold">Sell requests</h1><p class="mt-1 text-gray-500">People who want to sell you their clothes, from the “Sell to us” page.</p>'
+    render_admin('<h1 class="text-2xl font-semibold">Requests</h1><p class="mt-1 text-gray-500">Sell-to-us offers, wholesale enquiries and “find me a piece” requests.</p>'
         . '<div class="mt-8 grid max-w-3xl gap-4">' . ($cards ?: '<p class="text-gray-500">No requests yet.</p>') . '</div>', 'Sell requests');
 }
 

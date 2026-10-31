@@ -155,6 +155,9 @@ function client_ip(): string
 function log_error(string $message, $context = null): void
 {
     error_log('[tk-store] ' . $message . ($context !== null ? ' ' . json_encode($context) : ''));
+    if (function_exists('alert_owner_of_error') && preg_match('/^(Paystack|API error|Page error)/', $message)) {
+        alert_owner_of_error($message . ($context !== null ? ': ' . (is_string($context) ? $context : json_encode($context)) : ''));
+    }
 }
 
 /** Fixed-window rate limit stored in the database (works across PHP workers). */
@@ -365,6 +368,7 @@ function csrf_token(): string
 function require_admin(bool $mutating = false): void
 {
     if (!is_admin()) json_out(['error' => 'Unauthorized'], 401);
+    if (!staff_may_open((string) parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH))) json_out(['error' => 'Staff accounts can only manage orders'], 403);
     if ($mutating) {
         $header = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
         if (!$header || !hash_equals(csrf_token(), $header)) {

@@ -123,7 +123,8 @@
         brand: f.get("brand"), color: f.get("color"), measurements: f.get("measurements"), flaws: f.get("flaws"),
         publishAt: f.get("publishAt"),
         fit: f.get("fit"), fabric: f.get("fabric"), modelInfo: f.get("modelInfo"), era: f.get("era"), costNaira: Number(f.get("costNaira") || 0),
-        tags: ["rare", "vintage"].filter(function (t) { return f.get("tag_" + t) === "on"; }).join(",")
+        videoUrl: f.get("videoUrl") || "", source: f.get("source") || "",
+        tags: ["rare", "vintage", "mystery"].filter(function (t) { return f.get("tag_" + t) === "on"; }).join(",")
       }).then(function () { location.href = BASE + "/products"; })
         .catch(function (ex) { showError(err, ex.message); btn.disabled = false; btn.textContent = label; });
     });
@@ -371,5 +372,91 @@
     api("/api/admin/price-drop", "POST", { percent: Number(f.get("percent")), olderThanDays: Number(f.get("olderThanDays")), category: f.get("category") })
       .then(function (d) { alert(d.updated + " items updated"); location.reload(); })
       .catch(function (ex) { showError($("[data-error]", drop), ex.message); });
+  });
+
+  // ---------- video upload ----------
+  var vf = $("#video-field");
+  if (vf) {
+    var vFile = $("[data-video-file]", vf), vLabel = $("[data-video-label]", vf);
+    vFile.addEventListener("change", function () {
+      if (!vFile.files[0]) return;
+      var fd = new FormData(); fd.append("file", vFile.files[0]);
+      vLabel.textContent = "Uploading…"; showError($("[data-error]", vf), "");
+      api("/api/admin/upload-video", "POST", fd, true).then(function (d) { vf.querySelector("input[name=videoUrl]").value = d.url; })
+        .catch(function (ex) { showError($("[data-error]", vf), ex.message); })
+        .then(function () { vLabel.textContent = "Upload video"; vFile.value = ""; });
+    });
+  }
+
+  // ---------- WhatsApp templates, rider details, returns ----------
+  $all("[data-wa-template]").forEach(function (sel) {
+    sel.addEventListener("change", function () { if (sel.value) window.open(sel.value, "_blank", "noopener"); sel.value = ""; });
+  });
+  $all("[data-rider-form]").forEach(function (box) {
+    $("[data-save-rider]", box).addEventListener("click", function () {
+      var v = function (n) { return box.querySelector('[name="' + n + '"]').value; };
+      orderAction(box.getAttribute("data-rider-form"), { action: "rider", riderName: v("riderName"), riderPhone: v("riderPhone"), trackingUrl: v("trackingUrl") }, box.closest("[data-order-card]"));
+    });
+  });
+  $all("[data-return-form]").forEach(function (box) {
+    $("[data-record-return]", box).addEventListener("click", function () {
+      if (!confirm("Record this order as returned?")) return;
+      orderAction(box.getAttribute("data-return-form"), { action: "return", reason: box.querySelector('[name="reason"]').value, restock: box.querySelector('[name="restock"]').checked }, box.closest("[data-order-card]"));
+    });
+  });
+
+  // ---------- looks ----------
+  var outfitForm = $("#outfit-form");
+  if (outfitForm) outfitForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var f = new FormData(outfitForm);
+    api("/api/admin/outfits", "POST", { title: f.get("title"), description: f.get("description"), imageUrl: String(f.get("imageUrl") || "").trim(), productIds: f.getAll("pid") })
+      .then(function () { location.reload(); }).catch(function (ex) { showError($("p[data-error]:last-of-type", outfitForm) || $("[data-error]", outfitForm), ex.message); });
+  });
+  $all("[data-delete-outfit]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      if (!confirm("Delete this look? The pieces stay in your shop.")) return;
+      api("/api/admin/outfits/" + encodeURIComponent(b.getAttribute("data-delete-outfit")), "DELETE").then(function () { b.closest("li").remove(); }).catch(function (ex) { alert(ex.message); });
+    });
+  });
+
+  // ---------- blog ----------
+  var postForm = $("#post-form");
+  if (postForm) postForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var f = new FormData(postForm), id = postForm.getAttribute("data-id");
+    api(id ? "/api/admin/posts/" + encodeURIComponent(id) : "/api/admin/posts", id ? "PUT" : "POST",
+      { title: f.get("title"), body: f.get("body"), imageUrl: String(f.get("imageUrl") || "").trim(), published: f.get("published") === "on" })
+      .then(function () { location.href = BASE + "/blog"; })
+      .catch(function (ex) { var errs = $all("[data-error]", postForm); showError(errs[errs.length - 1], ex.message); });
+  });
+  $all("[data-delete-post]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      if (!confirm("Delete this post?")) return;
+      api("/api/admin/posts/" + encodeURIComponent(b.getAttribute("data-delete-post")), "DELETE").then(function () { b.closest("li").remove(); }).catch(function (ex) { alert(ex.message); });
+    });
+  });
+
+  // ---------- staff ----------
+  var staffForm = $("#staff-form");
+  if (staffForm) staffForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var f = new FormData(staffForm);
+    api("/api/admin/staff", "POST", { name: f.get("name"), password: f.get("password") }).then(function () { location.reload(); })
+      .catch(function (ex) { showError($("[data-error]", staffForm), ex.message); });
+  });
+  $all("[data-delete-staff]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      if (!confirm("Remove this staff account?")) return;
+      api("/api/admin/staff/" + encodeURIComponent(b.getAttribute("data-delete-staff")), "DELETE").then(function () { location.reload(); }).catch(function (ex) { alert(ex.message); });
+    });
+  });
+
+  // ---------- customer of the month ----------
+  $all("[data-review]").forEach(function (card) {
+    var fb = $("[data-review-feature]", card);
+    if (fb) fb.addEventListener("click", function () {
+      api("/api/admin/reviews/" + encodeURIComponent(card.getAttribute("data-review")) + "/feature", "POST", {}).then(function () { location.reload(); }).catch(function (ex) { alert(ex.message); });
+    });
   });
 })();

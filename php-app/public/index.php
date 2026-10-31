@@ -3,7 +3,7 @@
 
 declare(strict_types=1);
 
-const ASSET_VERSION = '3';
+const ASSET_VERSION = '4';
 
 require __DIR__ . '/app/bootstrap.php';
 require __DIR__ . '/app/icons.php';
@@ -57,6 +57,7 @@ try {
         header('Cache-Control: no-store');
         require __DIR__ . '/app/admin.php';
         require __DIR__ . '/app/admin_more.php';
+        require __DIR__ . '/app/promo_pages.php';
         if ($adminBase !== '/admin') ob_start(fn($html) => str_replace(['"/admin', "'/admin"], ['"' . $adminBase, "'" . $adminBase], $html));
         match (true) {
             $path === '/admin/login' => admin_login_page(),
@@ -69,6 +70,10 @@ try {
             $path === '/admin/activity' => admin_activity_page(),
             $path === '/admin/security' => admin_security_page(),
             $path === '/admin/offers' => admin_offers_page(),
+            $path === '/admin/looks' => admin_looks_page(),
+            $path === '/admin/blog' => admin_blog_page(),
+            $path === '/admin/blog/new' => admin_post_editor(null),
+            (bool) preg_match('#^/admin/blog/([^/]+)$#', $path, $m) => admin_post_editor($m[1]),
             $path === '/admin/sell' => admin_sell_page(),
             (bool) preg_match('#^/admin/orders/([^/]+)/slip$#', $path, $m) => admin_packing_slip($m[1]),
             (bool) preg_match('#^/admin/products/([^/]+)$#', $path, $m) => admin_edit_product($m[1]),
@@ -80,6 +85,7 @@ try {
     }
 
     require __DIR__ . '/app/pages.php';
+    require __DIR__ . '/app/promo_pages.php';
     match (true) {
         $path === '/' => page_home(),
         $path === '/shop' => page_shop(),
@@ -99,6 +105,14 @@ try {
         $path === '/privacy' => page_policy('privacyText', 'Privacy policy'),
         $path === '/size-guide' => page_policy('sizeGuide', 'Size guide'),
         $path === '/sell' => page_sell(),
+        $path === '/looks' => page_looks(),
+        (bool) preg_match('#^/looks/([^/]+)$#', $path, $m) => page_look($m[1]),
+        $path === '/blog' => page_blog(),
+        (bool) preg_match('#^/blog/([^/]+)$#', $path, $m) => page_post($m[1]),
+        $path === '/quiz' => page_quiz(),
+        $path === '/top-buyers' => page_top_buyers(),
+        $path === '/wholesale' => page_request_form('wholesale'),
+        $path === '/request' => page_request_form('request'),
         default => not_found_page(),
     };
 

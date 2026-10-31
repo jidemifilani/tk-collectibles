@@ -55,6 +55,8 @@ function validate_product(?array $d): array
         'era' => str_field($d, 'era', 40, false),
         'tags' => implode(',', array_values(array_intersect(array_map('trim', explode(',', strtolower((string) ($d['tags'] ?? '')))), array_keys(PRODUCT_TAGS)))),
         'cost' => max(0, min(MAX_ITEM_PRICE_NAIRA, (int) ($d['costNaira'] ?? 0))) * 100,
+        'videoUrl' => (function ($v) { $v = trim((string) $v); if ($v !== '' && !preg_match('#^(/uploads/video/[\w.-]+|https://\S+\.(mp4|webm))$#i', $v)) throw new InvalidArgumentException('Video must be an uploaded clip or an https link to an .mp4 file'); return $v; })($d['videoUrl'] ?? ''),
+        'source' => str_field($d, 'source', 80, false, 'Source'),
     ];
 }
 
@@ -119,6 +121,16 @@ function handle_api(string $path, string $method): void
             ['DELETE', '#^/api/admin/reviews/([^/]+)$#', 'api_admin_delete_review'],
             ['POST', '#^/api/admin/2fa/start$#', 'api_admin_2fa_start'],
             ['POST', '#^/api/offers$#', 'api_offer_submit'],
+            ['POST', '#^/api/price-watch$#', 'api_price_watch'],
+            ['POST', '#^/api/admin/posts$#', 'api_admin_save_post'],
+            ['PUT', '#^/api/admin/posts/([^/]+)$#', 'api_admin_update_post'],
+            ['DELETE', '#^/api/admin/posts/([^/]+)$#', 'api_admin_delete_post'],
+            ['POST', '#^/api/admin/outfits$#', 'api_admin_save_outfit'],
+            ['DELETE', '#^/api/admin/outfits/([^/]+)$#', 'api_admin_delete_outfit'],
+            ['POST', '#^/api/admin/staff$#', 'api_admin_add_staff'],
+            ['DELETE', '#^/api/admin/staff/([^/]+)$#', 'api_admin_delete_staff'],
+            ['POST', '#^/api/admin/reviews/([^/]+)/feature$#', 'api_admin_feature_review'],
+            ['POST', '#^/api/admin/upload-video$#', 'api_admin_upload_video'],
             ['POST', '#^/api/sell$#', 'api_sell_submit'],
             ['PUT', '#^/api/admin/offers/([^/]+)$#', 'api_admin_offer_decide'],
             ['PUT', '#^/api/admin/sell/([^/]+)$#', 'api_admin_sell_status'],
@@ -154,7 +166,7 @@ function api_products(): void
         $ids = array_slice(array_values(array_filter(explode(',', (string) $_GET['ids']))), 0, 50);
         if (!$ids) json_out(['products' => []]);
         $rows = fetch_products('id IN (' . rtrim(str_repeat('?,', count($ids)), ',') . ') AND ' . published_sql(), $ids, '');
-        json_out(['products' => array_map(fn($p) => product_json($p) + ['availability' => product_availability($p)], $rows)]);
+        json_out(['products' => array_map('public_product_json', $rows)]);
     }
     $pageSize = min(100, max(1, (int) ($_GET['pageSize'] ?? 24)));
     $page = max(1, (int) ($_GET['page'] ?? 1));
@@ -164,7 +176,7 @@ function api_products(): void
     if ($cat && $cat !== 'all') { $where .= ' AND category = ?'; $params[] = $cat; }
     if (($_GET['featured'] ?? '') === 'true') $where .= ' AND featured = 1';
     $products = fetch_products($where, $params, "ORDER BY createdAt DESC LIMIT $pageSize OFFSET " . (($page - 1) * $pageSize));
-    json_out(['products' => array_map('product_json', $products), 'total' => count_products($where, $params), 'page' => $page, 'pageSize' => $pageSize]);
+    json_out(['products' => array_map('public_product_json', $products), 'total' => count_products($where, $params), 'page' => $page, 'pageSize' => $pageSize]);
 }
 
 function api_product_by_slug(string $slug): void
@@ -172,7 +184,17 @@ function api_product_by_slug(string $slug): void
     $st = db()->prepare('SELECT * FROM Product WHERE slug = ? AND ' . published_sql());
     $st->execute([$slug]);
     $p = $st->fetch();
-    $p ? json_out(product_json($p)) : json_out(['error' => 'Product not found'], 404);
+    $p ? json_out(public_product_json($p)) : json_out(['error' => 'Product not found'], 404);
+}
+
+/** Shopper-safe product data: hides what you paid and where it came from. */
+function public_product_json(array $p): array
+{
+    $j = product_json($p);
+    unset($j['cost'], $j['source']);
+    $j['availability'] = product_availability($p);
+    $j['price'] = effective_price($p);
+    return $j;
 }
 
 function api_cart_check(): void
@@ -187,7 +209,7 @@ function api_cart_check(): void
     $items = array_map(fn($id) => [
         'id' => $id,
         'available' => isset($found[$id]) && product_availability($found[$id]) === 'available',
-        'salePrice' => isset($found[$id]) ? (int) $found[$id]['salePrice'] : null,
+        'salePrice' => isset($found[$id]) ? effective_price($found[$id]) : null,
     ], $ids);
     json_out(['items' => $items]);
 }
@@ -296,6 +318,8 @@ function read_checkout(?array $d): array
         'method' => $method, 'items' => $items,
         'notes' => str_field($d, 'notes', 500, false, 'Order note'),
         'giftWrap' => !empty($d['giftWrap']),
+        'tip' => max(0, min(100000, (int) ($d['tip'] ?? 0))) * 100,
+        'leaderboard' => !empty($d['leaderboard']),
         'pickup' => $pickup,
     ];
 }
@@ -305,10 +329,15 @@ function api_checkout_quote(): void
 {
     $d = json_body() ?? [];
     $subtotal = 0;
-    $st = db()->prepare('SELECT salePrice FROM Product WHERE id = ?');
+    $count = 0;
+    $st = db()->prepare('SELECT * FROM Product WHERE id = ?');
     foreach (array_slice((array) ($d['items'] ?? []), 0, 50) as $i) {
         $st->execute([(string) ($i['productId'] ?? '')]);
-        $subtotal += (int) $st->fetchColumn() * max(1, min(20, (int) ($i['quantity'] ?? 1)));
+        $row = $st->fetch();
+        if (!$row) continue;
+        $qty = max(1, min(20, (int) ($i['quantity'] ?? 1)));
+        $subtotal += effective_price($row) * $qty;
+        $count += $qty;
     }
     $state = (string) ($d['state'] ?? '');
     $s = settings();
@@ -325,7 +354,10 @@ function api_checkout_quote(): void
         $codeError = $ex->getMessage();
     }
     json_out(['subtotal' => $subtotal, 'delivery' => $delivery, 'discount' => $discount, 'code' => $code,
-        'codeError' => $codeError, 'giftWrap' => $wrap, 'total' => $subtotal + (int) $delivery + $wrap - $discount]);
+        'codeError' => $codeError, 'giftWrap' => $wrap, 'bundle' => $bundle = bundle_discount($count, $subtotal),
+        'tip' => $tip = max(0, min(100000, (int) ($d['tip'] ?? 0))) * 100, 'freeGift' => free_gift_for($subtotal),
+        'freeGiftOver' => (int) settings()['freeGiftOver'] * 100, 'freeGiftText' => settings()['freeGiftText'],
+        'total' => $subtotal + (int) $delivery + $wrap + $tip - $discount - $bundle]);
 }
 
 /**
@@ -353,18 +385,27 @@ function create_order(array $c, ?string $idem): array
             $up = $pdo->prepare('UPDATE Product SET reservedUntil = ? WHERE id = ? AND inStock = 1 AND (reservedUntil IS NULL OR reservedUntil < ?)');
             $up->execute([$reservedUntil, $p['id'], $now]);
             if ($up->rowCount() === 0) throw new InvalidArgumentException('"' . $p['name'] . '" just sold or is being purchased by someone else');
-            $subtotal += (int) $p['salePrice'] * $item['quantity'];
-            $lines[] = [new_id(), $orderId, $p['id'], $item['quantity'], (int) $p['salePrice'], $item['size']];
+            $price = effective_price($p);
+            $subtotal += $price * $item['quantity'];
+            $itemCount = ($itemCount ?? 0) + $item['quantity'];
+            $lines[] = [new_id(), $orderId, $p['id'], $item['quantity'], $price, $item['size']];
         }
         [$discount, $code] = apply_discount($c['code'], $subtotal, array_column($c['items'], 'productId'));
         $delivery = $c['pickup'] ? 0 : delivery_fee($c['state'], $subtotal);
         $wrap = $c['giftWrap'] ? (int) settings()['giftWrapPrice'] * 100 : 0;
-        $total = $subtotal - $discount + $delivery + $wrap;
+        if ($code) {
+            $own = $pdo->prepare('SELECT ownerEmail FROM DiscountCode WHERE code = ?');
+            $own->execute([$code]);
+            if (strtolower((string) $own->fetchColumn()) === strtolower($c['email'])) throw new InvalidArgumentException('You can\'t use your own referral code — share it with friends!');
+        }
+        $bundle = bundle_discount($itemCount, $subtotal);
+        $gift = free_gift_for($subtotal);
+        $total = $subtotal - $discount - $bundle + $delivery + $wrap + $c['tip'];
         if ($total < 10000) throw new InvalidArgumentException('Minimum order amount is ₦100');
         $status = $c['method'] === 'paystack' ? 'pending' : 'awaiting';
 
-        $pdo->prepare('INSERT INTO "Order" (id, reference, idempotencyKey, customerName, customerEmail, customerPhone, shippingAddress, city, state, totalAmount, status, createdAt, updatedAt, deliveryFee, discountAmount, discountCode, paymentMethod, notes, giftWrap, giftWrapFee, deliveryMethod) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-            ->execute([$orderId, $reference, $idem, $c['name'], $c['email'], $c['phone'], $c['address'], $c['city'], $c['state'], $total, $status, $now, $now, $delivery, $discount, $code, $c['method'], $c['notes'], $c['giftWrap'] ? 1 : 0, $wrap, $c['pickup'] ? 'pickup' : 'delivery']);
+        $pdo->prepare('INSERT INTO "Order" (id, reference, idempotencyKey, customerName, customerEmail, customerPhone, shippingAddress, city, state, totalAmount, status, createdAt, updatedAt, deliveryFee, discountAmount, discountCode, paymentMethod, notes, giftWrap, giftWrapFee, deliveryMethod, tip, bundleDiscount, freeGift, leaderboard) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+            ->execute([$orderId, $reference, $idem, $c['name'], $c['email'], $c['phone'], $c['address'], $c['city'], $c['state'], $total, $status, $now, $now, $delivery, $discount, $code, $c['method'], $c['notes'], $c['giftWrap'] ? 1 : 0, $wrap, $c['pickup'] ? 'pickup' : 'delivery', $c['tip'], $bundle, $gift, $c['leaderboard'] ? 1 : 0]);
         $ins = $pdo->prepare('INSERT INTO OrderItem (id, orderId, productId, quantity, price, size) VALUES (?,?,?,?,?,?)');
         foreach ($lines as $l) $ins->execute($l);
         if ($code) {
@@ -448,6 +489,8 @@ function order_with_items(string $where, array $params): ?array
     $o['giftWrapFee'] = (int) ($o['giftWrapFee'] ?? 0);
     $o['notes'] = (string) ($o['notes'] ?? '');
     $o['deliveryMethod'] = (string) ($o['deliveryMethod'] ?? 'delivery');
+    $o['tip'] = (int) ($o['tip'] ?? 0);
+    $o['bundleDiscount'] = (int) ($o['bundleDiscount'] ?? 0);
     $o['items'] = array_map(fn($i) => [
         'id' => $i['id'], 'productId' => $i['productId'], 'quantity' => (int) $i['quantity'],
         'price' => (int) $i['price'], 'size' => $i['size'],
@@ -471,6 +514,7 @@ function mark_order_paid(array $order, string $paystackRef): void
         $order['status'] = 'paid';
         try { notify_order($order, 'placed'); } catch (Throwable $ex) { log_error('Order email failed', $ex->getMessage()); }
     }
+    try { after_order_paid($order); } catch (Throwable $ex) { log_error('Loyalty/referral failed', $ex->getMessage()); }
 }
 
 function api_paystack_verify(): void
@@ -574,19 +618,26 @@ function api_admin_login(): void
         admin_log('login_failed', $msg);
         json_out(['error' => $msg], 401);
     };
-    if ($password === '' || $expected === '' || !hash_equals($expected, $password)) $fail('Invalid password');
+    $staffName = null;
+    if ($password === '' || $expected === '' || !hash_equals($expected, $password)) {
+        $staffName = $password !== '' ? staff_login($password) : null;
+        if ($staffName === null) $fail('Invalid password');
+        $secret = null; // 2-step login protects the owner account
+    }
     if ($secret) {
         if (trim((string) ($d['code'] ?? '')) === '') json_out(['error' => 'Enter the 6-digit code from your authenticator app', 'needCode' => true], 401);
         if (!totp_verify($secret, (string) $d['code'])) $fail('Wrong authenticator code');
     }
     db()->prepare('DELETE FROM RateLimit WHERE key = ?')->execute([$key]);
-    admin_log('login', 'Signed in');
+    admin_log('login', $staffName ? 'Staff: ' . $staffName : 'Owner signed in');
     start_session();
     session_regenerate_id(true);
     $_SESSION['admin'] = true;
     $_SESSION['expires'] = time() + 60 * 60 * 24 * 7;
     $_SESSION['csrf'] = bin2hex(random_bytes(24));
-    json_out(['success' => true]);
+    $_SESSION['role'] = $staffName ? 'staff' : 'owner';
+    $_SESSION['staffName'] = $staffName;
+    json_out(['success' => true, 'role' => $_SESSION['role']]);
 }
 
 function api_admin_logout(): void
@@ -654,7 +705,13 @@ function api_admin_update_product(string $id): void
     db()->prepare("UPDATE Product SET $sets WHERE id = ?")->execute([...array_values($d), $id]);
     $st = db()->prepare('SELECT * FROM Product WHERE id = ?');
     $st->execute([$id]);
-    json_out(product_json($st->fetch()));
+    $after = $st->fetch();
+    if ($after['salePrice'] < $before['salePrice']) {
+        respond_then_continue(product_json($after));
+        notify_price_drops($id);
+        exit;
+    }
+    json_out(product_json($after));
 }
 
 function api_admin_delete_product(string $id): void
@@ -714,6 +771,13 @@ function api_admin_update_settings(): void
     $data['pickupEnabled'] = !empty($d['pickupEnabled']) && $d['pickupEnabled'] !== 'false' ? 1 : 0;
     $data['offersEnabled'] = !empty($d['offersEnabled']) && $d['offersEnabled'] !== 'false' ? 1 : 0;
     $data['giftWrapPrice'] = max(0, min(100000, (int) ($d['giftWrapPrice'] ?? 0)));
+    foreach (['bundleMin' => 20, 'bundlePct' => 50, 'flashPct' => 80, 'birthdayPct' => 50] as $k => $max) $data[$k] = max(0, min($max, (int) ($d[$k] ?? 0)));
+    foreach (['freeGiftOver', 'loyaltyPoints', 'loyaltyReward', 'referralReward'] as $k) $data[$k] = max(0, min(1000000, (int) ($d[$k] ?? 0)));
+    $data['freeGiftText'] = str_field($d, 'freeGiftText', 120, false);
+    $fc = (string) ($d['flashCategory'] ?? '');
+    $data['flashCategory'] = isset(CATEGORIES[$fc]) && $fc !== 'all' ? $fc : '';
+    $fe = trim((string) ($d['flashEndsAt'] ?? ''));
+    $data['flashEndsAt'] = $fe === '' ? null : ((strtotime($fe) ?: 0) * 1000 ?: null);
     if ($data['gaId'] !== '' && !preg_match('/^G-[A-Z0-9]{4,20}$/', $data['gaId'])) throw new InvalidArgumentException('Google Analytics ID looks like G-XXXXXXX');
     if ($data['metaPixelId'] !== '' && !preg_match('/^\d{6,20}$/', $data['metaPixelId'])) throw new InvalidArgumentException('Meta Pixel ID is a number');
     foreach (['colorCream', 'colorSand', 'colorTerracotta', 'colorRust', 'colorOlive', 'colorCharcoal', 'colorWarmgray'] as $k) {
@@ -841,6 +905,7 @@ function api_track(): void
         'reference' => $o['reference'], 'status' => $o['status'], 'fulfillment' => $o['fulfillment'],
         'paymentMethod' => $o['paymentMethod'], 'totalAmount' => $o['totalAmount'], 'createdAt' => (int) $o['createdAt'],
         'updatedAt' => (int) $o['updatedAt'], 'city' => $o['city'], 'state' => $o['state'],
+        'riderName' => $o['riderName'] ?? '', 'riderPhone' => $o['riderPhone'] ?? '', 'trackingUrl' => $o['trackingUrl'] ?? '', 'deliveryMethod' => $o['deliveryMethod'],
         'items' => array_map(fn($i) => ['name' => $i['product']['name'], 'quantity' => $i['quantity'], 'price' => $i['price']], $o['items']),
     ]]);
 }
@@ -857,6 +922,10 @@ function api_subscribe(): void
     if ($cat !== '' && (!isset(CATEGORIES[$cat]) || $cat === 'all')) $cat = '';
     db()->prepare('INSERT OR IGNORE INTO Subscriber (id, email, category, token, createdAt) VALUES (?,?,?,?,?)')
         ->execute([new_id(), $email, $cat, bin2hex(random_bytes(16)), now_ms()]);
+    $bday = (string) ($d['birthday'] ?? '');
+    if (preg_match('/^\d{4}-(\d{2})-(\d{2})$/', $bday, $bm) && checkdate((int) $bm[1], (int) $bm[2], 2000)) {
+        db()->prepare('UPDATE Subscriber SET birthday = ? WHERE email = ?')->execute([$bm[1] . '-' . $bm[2], $email]);
+    }
     json_out(['ok' => true]);
 }
 
@@ -937,6 +1006,17 @@ function api_admin_update_order(string $id): void
         $pdo->prepare('UPDATE "Order" SET status = \'cancelled\', updatedAt = ? WHERE id = ?')->execute([now_ms(), $id]);
         $ids = array_column($o['items'], 'productId');
         if ($ids) $pdo->prepare('UPDATE Product SET inStock = 1, reservedUntil = NULL, soldAt = NULL WHERE id IN (' . rtrim(str_repeat('?,', count($ids)), ',') . ')')->execute($ids);
+    } elseif ($action === 'rider') {
+        $url = trim((string) ($d['trackingUrl'] ?? ''));
+        if ($url !== '' && !preg_match('#^https://#i', $url)) throw new InvalidArgumentException('Tracking link must start with https://');
+        $pdo->prepare('UPDATE "Order" SET riderName = ?, riderPhone = ?, trackingUrl = ?, updatedAt = ? WHERE id = ?')
+            ->execute([str_field($d, 'riderName', 80, false), str_field($d, 'riderPhone', 30, false), $url, now_ms(), $id]);
+    } elseif ($action === 'return') {
+        $pdo->prepare('UPDATE "Order" SET returnStatus = \'returned\', returnReason = ?, updatedAt = ? WHERE id = ?')->execute([str_field($d, 'reason', 300, true, 'Reason'), now_ms(), $id]);
+        if (!empty($d['restock'])) {
+            $ids = array_column($o['items'], 'productId');
+            if ($ids) $pdo->prepare('UPDATE Product SET inStock = 1, reservedUntil = NULL, soldAt = NULL WHERE id IN (' . rtrim(str_repeat('?,', count($ids)), ',') . ')')->execute($ids);
+        }
     } elseif ($action === 'fulfillment' && isset(FULFILLMENT_LABELS[$d['value'] ?? ''])) {
         $pdo->prepare('UPDATE "Order" SET fulfillment = ?, updatedAt = ? WHERE id = ?')->execute([$d['value'], now_ms(), $id]);
     } else {
@@ -1155,10 +1235,11 @@ function api_sell_submit(): void
             $photos[] = '/uploads/sell/' . $name2;
         }
     }
-    db()->prepare('INSERT INTO SellRequest (id, name, phone, email, description, askingPrice, photos, createdAt) VALUES (?,?,?,?,?,?,?,?)')
-        ->execute([new_id(), $name, $phone, $email, $desc, max(0, (int) ($d['askingPrice'] ?? 0)) * 100, json_encode($photos), now_ms()]);
+    $kind = in_array($d['kind'] ?? '', ['wholesale', 'request'], true) ? $d['kind'] : 'sell';
+    db()->prepare('INSERT INTO SellRequest (id, name, phone, email, description, askingPrice, photos, createdAt, kind) VALUES (?,?,?,?,?,?,?,?,?)')
+        ->execute([new_id(), $name, $phone, $email, $desc, max(0, (int) ($d['askingPrice'] ?? 0)) * 100, json_encode($photos), now_ms(), $kind]);
     respond_then_continue(['ok' => true, 'message' => "Thanks! We'll review your pieces and reply on WhatsApp within 2 days."]);
-    telegram_alert('👗 Sell request from ' . $name . ' · ' . $phone . "\n" . mb_substr($desc, 0, 300));
+    telegram_alert(['sell' => '👗 Sell request', 'wholesale' => '📦 Wholesale enquiry', 'request' => '🔎 Find-me-a-piece request'][$kind] . ' from ' . $name . ' · ' . $phone . "\n" . mb_substr($desc, 0, 300));
     exit;
 }
 
@@ -1189,5 +1270,9 @@ function api_admin_price_drop(): void
     $st = db()->prepare("UPDATE Product SET salePrice = MAX(10000, CAST(ROUND(salePrice * (100 - ?) / 100.0 / 10000.0) AS INTEGER) * 10000) WHERE $where");
     $st->execute([$pct, ...$params]);
     admin_log('price_drop', "-$pct% on " . $st->rowCount() . ' items');
-    json_out(['ok' => true, 'updated' => $st->rowCount()]);
+    $n = $st->rowCount();
+    respond_then_continue(['ok' => true, 'updated' => $n]);
+    $w = db()->query('SELECT DISTINCT productId FROM PriceWatch')->fetchAll(PDO::FETCH_COLUMN);
+    foreach ($w as $pid) notify_price_drops($pid);
+    exit;
 }
