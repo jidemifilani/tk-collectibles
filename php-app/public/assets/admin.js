@@ -121,7 +121,9 @@
         imageUrl: String(f.get("imageUrl")).trim(), images: galleryUrls(),
         featured: f.get("featured") === "on", inStock: f.get("inStock") === "on",
         brand: f.get("brand"), color: f.get("color"), measurements: f.get("measurements"), flaws: f.get("flaws"),
-        publishAt: f.get("publishAt")
+        publishAt: f.get("publishAt"),
+        fit: f.get("fit"), fabric: f.get("fabric"), modelInfo: f.get("modelInfo"), era: f.get("era"), costNaira: Number(f.get("costNaira") || 0),
+        tags: ["rare", "vintage"].filter(function (t) { return f.get("tag_" + t) === "on"; }).join(",")
       }).then(function () { location.href = BASE + "/products"; })
         .catch(function (ex) { showError(err, ex.message); btn.disabled = false; btn.textContent = label; });
     });
@@ -341,4 +343,33 @@
         .then(function () { location.reload(); }).catch(function (ex) { say(ex.message); });
     });
   }
+
+  // ---------- offers ----------
+  $all("[data-offer-id]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var accept = b.getAttribute("data-decision") === "accept";
+      if (!confirm(accept ? "Accept this offer? The shopper gets a 48-hour code by email." : "Decline this offer?")) return;
+      b.disabled = true;
+      api("/api/admin/offers/" + encodeURIComponent(b.getAttribute("data-offer-id")), "PUT", { action: accept ? "accept" : "decline" })
+        .then(function () { location.reload(); }).catch(function (ex) { alert(ex.message); b.disabled = false; });
+    });
+  });
+
+  // ---------- sell requests ----------
+  $all("[data-sell-status]").forEach(function (sel) {
+    sel.addEventListener("change", function () {
+      api("/api/admin/sell/" + encodeURIComponent(sel.getAttribute("data-sell-status")), "PUT", { status: sel.value }).catch(function (ex) { alert(ex.message); });
+    });
+  });
+
+  // ---------- bulk price drop ----------
+  var drop = $("#price-drop");
+  if (drop) drop.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var f = new FormData(drop);
+    if (!confirm("Reduce prices by " + f.get("percent") + "% on matching in-stock items?")) return;
+    api("/api/admin/price-drop", "POST", { percent: Number(f.get("percent")), olderThanDays: Number(f.get("olderThanDays")), category: f.get("category") })
+      .then(function (d) { alert(d.updated + " items updated"); location.reload(); })
+      .catch(function (ex) { showError($("[data-error]", drop), ex.message); });
+  });
 })();

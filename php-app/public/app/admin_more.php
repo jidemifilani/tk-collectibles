@@ -131,3 +131,71 @@ function admin_security_page(): void
         . '<a href="/api/admin/backup" class="mt-4 inline-flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium hover:bg-gray-50">' . icon('download') . 'Download database backup</a></section>';
     render_admin($content, 'Security');
 }
+
+function admin_offers_page(): void
+{
+    admin_guard_page();
+    $rows = db()->query('SELECT o.*, p.name AS productName, p.slug, p.salePrice, p.imageUrl FROM Offer o LEFT JOIN Product p ON p.id = o.productId ORDER BY (o.status = \'new\') DESC, o.createdAt DESC LIMIT 100')->fetchAll();
+    $badge = ['new' => 'bg-yellow-100 text-yellow-800', 'accepted' => 'bg-green-100 text-green-800', 'used' => 'bg-green-100 text-green-800', 'declined' => 'bg-gray-100 text-gray-600'];
+    $cards = '';
+    foreach ($rows as $o) {
+        $pct = $o['salePrice'] ? (int) round(100 - $o['amount'] / $o['salePrice'] * 100) : 0;
+        $cards .= '<div class="flex gap-4 rounded-xl border border-gray-200 bg-white p-4">'
+            . '<img src="' . e($o['imageUrl'] ?? '') . '" alt="" class="h-20 w-16 shrink-0 rounded bg-gray-100 object-cover">'
+            . '<div class="flex-1"><div class="flex flex-wrap items-center justify-between gap-2"><a href="/product/' . e($o['slug'] ?? '') . '" target="_blank" class="font-semibold hover:underline">' . e($o['productName'] ?? 'Deleted item') . '</a>'
+            . '<span class="rounded-full px-2 py-0.5 text-xs capitalize ' . ($badge[$o['status']] ?? '') . '">' . e($o['status']) . '</span></div>'
+            . '<p class="mt-1 text-sm"><strong>' . naira((int) $o['amount']) . '</strong> offered · listed ' . naira((int) $o['salePrice']) . ' (' . $pct . '% less)</p>'
+            . '<p class="text-xs text-gray-500">' . e($o['name']) . ' · ' . e($o['phone']) . ' · ' . e($o['email']) . ' · ' . e(date('j M, g:ia', intdiv((int) $o['createdAt'], 1000))) . '</p>'
+            . ($o['code'] ? '<p class="mt-1 text-xs">Code sent: <span class="font-mono">' . e($o['code']) . '</span></p>' : '')
+            . ($o['status'] === 'new' ? '<div class="mt-3 flex gap-2"><button type="button" data-offer-id="' . e($o['id']) . '" data-decision="accept" class="rounded-lg bg-green-700 px-3 py-1.5 text-xs font-medium text-white">Accept</button>'
+                . '<button type="button" data-offer-id="' . e($o['id']) . '" data-decision="decline" class="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium">Decline</button></div>' : '')
+            . '</div></div>';
+    }
+    render_admin('<h1 class="text-2xl font-semibold">Offers</h1><p class="mt-1 text-gray-500">Accepting emails the shopper a one-time code for their price, valid 48 hours, for that item only.</p>'
+        . '<div class="mt-8 grid max-w-3xl gap-3">' . ($cards ?: '<p class="text-gray-500">No offers yet.</p>') . '</div>', 'Offers');
+}
+
+function admin_sell_page(): void
+{
+    admin_guard_page();
+    $cards = '';
+    foreach (db()->query('SELECT * FROM SellRequest ORDER BY (status = \'new\') DESC, createdAt DESC LIMIT 100')->fetchAll() as $r) {
+        $photos = '';
+        foreach (json_decode($r['photos'], true) ?: [] as $ph) $photos .= '<a href="' . e($ph) . '" target="_blank"><img src="' . e($ph) . '" alt="" class="h-20 w-20 rounded object-cover"></a>';
+        $opts = '';
+        foreach (['new' => 'New', 'contacted' => 'Contacted', 'bought' => 'Bought', 'declined' => 'Declined'] as $k => $l) $opts .= '<option value="' . $k . '"' . ($r['status'] === $k ? ' selected' : '') . '>' . $l . '</option>';
+        $cards .= '<div class="rounded-xl border border-gray-200 bg-white p-5"><div class="flex flex-wrap items-center justify-between gap-2"><p class="font-semibold">' . e($r['name']) . ' · ' . e($r['phone']) . ($r['email'] ? ' · ' . e($r['email']) : '') . '</p>'
+            . '<select data-sell-status="' . e($r['id']) . '" class="rounded-lg border border-gray-300 px-2 py-1 text-xs">' . $opts . '</select></div>'
+            . '<p class="mt-2 whitespace-pre-line text-sm text-gray-700">' . e($r['description']) . '</p>'
+            . ((int) $r['askingPrice'] ? '<p class="mt-1 text-sm">Asking: <strong>' . naira((int) $r['askingPrice']) . '</strong></p>' : '')
+            . ($photos ? '<div class="mt-3 flex flex-wrap gap-2">' . $photos . '</div>' : '')
+            . '<div class="mt-3 flex gap-2 text-xs text-gray-400">' . e(date('j M Y, g:ia', intdiv((int) $r['createdAt'], 1000)))
+            . ' · <a href="' . e(whatsapp_link($r['phone'])) . '" target="_blank" rel="noopener noreferrer" class="text-blue-600 underline">WhatsApp them</a></div></div>';
+    }
+    render_admin('<h1 class="text-2xl font-semibold">Sell requests</h1><p class="mt-1 text-gray-500">People who want to sell you their clothes, from the “Sell to us” page.</p>'
+        . '<div class="mt-8 grid max-w-3xl gap-4">' . ($cards ?: '<p class="text-gray-500">No requests yet.</p>') . '</div>', 'Sell requests');
+}
+
+/** Printable packing slip with an address label on top. */
+function admin_packing_slip(string $id): void
+{
+    admin_guard_page();
+    require_once __DIR__ . '/api.php';
+    $o = order_with_items('id = ?', [$id]);
+    if (!$o) { http_response_code(404); echo 'Order not found'; return; }
+    $s = settings();
+    $rows = '';
+    foreach ($o['items'] as $i) $rows .= '<tr><td>' . e($i['product']['name']) . '</td><td>' . e($i['size']) . '</td><td>' . (int) $i['quantity'] . '</td><td class="r">' . naira($i['price'] * $i['quantity']) . '</td></tr>';
+    $paid = $o['status'] === 'paid' ? 'PAID' : ($o['paymentMethod'] === 'pod' ? 'COLLECT ' . naira($o['totalAmount']) . ' ON DELIVERY' : strtoupper($o['status']));
+    header('Content-Type: text/html; charset=utf-8');
+    echo '<!doctype html><html><head><meta charset="utf-8"><meta name="robots" content="noindex"><title>Slip ' . e($o['reference']) . '</title><link rel="stylesheet" href="/assets/slip.css"></head><body>'
+        . '<button class="noprint" data-print>Print</button>'
+        . '<section class="label"><p class="small">SHIP TO</p><p class="big">' . e($o['customerName']) . '</p><p>' . e($o['shippingAddress']) . '<br>' . e($o['city']) . ', ' . e($o['state']) . '</p><p class="big">' . e($o['customerPhone']) . '</p>'
+        . '<p class="small">FROM: ' . e($s['storeName']) . ' · ' . e($s['customerCarePhone']) . '</p><p class="tag">' . e($paid) . '</p>' . ($o['deliveryMethod'] === 'pickup' ? '<p class="tag">PICKUP</p>' : '') . '</section>'
+        . '<section><h1>' . e($s['storeName']) . '</h1><p>Order <strong>' . e($o['reference']) . '</strong> · ' . e(date('j M Y', intdiv((int) $o['createdAt'], 1000))) . '</p>'
+        . '<table><thead><tr><th>Item</th><th>Size</th><th>Qty</th><th class="r">Price</th></tr></thead><tbody>' . $rows . '</tbody></table>'
+        . '<p class="r">Delivery: ' . naira($o['deliveryFee']) . ($o['discountAmount'] ? ' · Discount: −' . naira($o['discountAmount']) : '') . ($o['giftWrap'] ? ' · Gift wrap: ' . naira($o['giftWrapFee']) : '') . '<br><strong>Total: ' . naira($o['totalAmount']) . '</strong></p>'
+        . ($o['notes'] !== '' ? '<p class="note">Note: ' . e($o['notes']) . '</p>' : '') . ($o['giftWrap'] ? '<p class="note">🎁 GIFT WRAP</p>' : '')
+        . '<p class="small">Thank you for shopping one-of-one! Track your order: ' . e(app_url()) . '/track · Returns: ' . e(app_url()) . '/returns</p></section>'
+        . '<script src="/assets/slip.js"></script></body></html>';
+}

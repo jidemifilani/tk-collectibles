@@ -150,6 +150,8 @@ function render_store(string $content, array $meta = []): void
         'storeName' => $s['storeName'],
         'phone' => $s['customerCarePhone'],
         'vapidKey' => config('VAPID_PUBLIC_KEY'),
+        'gaId' => $s['gaId'] ?? '',
+        'pixelId' => $s['metaPixelId'] ?? '',
     ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
 
     $newBar = new_arrival_bar();
@@ -186,6 +188,7 @@ function render_store(string $content, array $meta = []): void
     <a href="/" class="flex min-w-0 shrink items-center gap-2" aria-label="<?= e($s['storeName']) ?>"><?= $brand ?></a>
     <nav class="hidden items-center gap-8 md:flex"><?= $navLinks ?></nav>
     <div class="flex shrink-0 items-center gap-3">
+      <a href="/shop?q=" data-search-toggle class="rounded-full p-2 text-charcoal transition-colors hover:bg-sand/50" aria-label="Search"><?= icon('search', 'h-5 w-5') ?></a>
       <?= $socialIcons ?>
       <a href="/wishlist" class="relative rounded-full p-2 text-charcoal transition-colors hover:bg-sand/50" aria-label="Wishlist">
         <?= icon('heart', 'h-5 w-5') ?>
@@ -200,6 +203,7 @@ function render_store(string $content, array $meta = []): void
       </button>
     </div>
   </div>
+  <form id="search-bar" action="/shop" method="get" class="hidden border-t border-sand px-4 py-3" role="search"><div class="mx-auto flex max-w-6xl gap-2 sm:px-2"><label for="q" class="sr-only">Search</label><input id="q" name="q" type="search" placeholder="Search brands, items, colours…" class="min-w-0 flex-1 rounded-full border border-sand bg-white px-4 py-2 text-sm focus:border-terracotta focus:outline-none"><button class="rounded-full bg-terracotta px-4 py-2 text-sm font-semibold text-cream">Search</button></div></form>
   <nav id="mobile-menu" class="hidden border-t border-sand px-4 py-4 md:hidden"><div class="flex flex-col gap-3"><?= $mobileLinks ?></div></nav>
 </header>
 <main class="flex-1"><?= $content ?></main>
@@ -221,6 +225,9 @@ function render_store(string $content, array $meta = []): void
           <li><a href="/cart" class="hover:text-terracotta">Your cart</a></li>
           <li><a href="/wishlist" class="hover:text-terracotta">Wishlist</a></li>
           <li><a href="/track" class="hover:text-terracotta">Track your order</a></li>
+          <li><a href="/sell" class="hover:text-terracotta">Sell to us</a></li>
+          <li><a href="/size-guide" class="hover:text-terracotta">Size guide</a></li>
+          <li><a href="/returns" class="hover:text-terracotta">Returns &amp; refunds</a></li>
         </ul>
       </div>
       <div>
@@ -229,7 +236,7 @@ function render_store(string $content, array $meta = []): void
         <p class="mt-4 text-sm text-sand/80"><?= e($s['customerCareHours']) ?></p>
       </div>
     </div>
-    <p class="mt-10 border-t border-sand/20 pt-6 text-center text-xs text-sand/70">© <?= $year ?> <?= e($s['storeName']) ?>. All rights reserved.</p>
+    <p class="mt-10 border-t border-sand/20 pt-6 text-center text-xs text-sand/70">© <?= $year ?> <?= e($s['storeName']) ?>. All rights reserved. · <a href="/terms" class="hover:text-cream">Terms</a> · <a href="/privacy" class="hover:text-cream">Privacy</a></p>
   </div>
 </footer>
 <?= chat_widget_html($s) ?>

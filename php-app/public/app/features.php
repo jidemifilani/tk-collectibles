@@ -4,17 +4,21 @@
  * discount codes, email, admin activity log, 2-step login (TOTP), and scheduled drops.
  */
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+const PRODUCT_TAGS = ['rare' => 'Rare find', 'vintage' => 'Vintage'];
+const ERAS = ['70s', '80s', '90s', 'Y2K', '2010s', 'Modern'];
 
 /** Adds new columns/tables once. PRAGMA user_version records what has already run. */
 function migrate_schema(PDO $pdo): void
 {
-    if ((int) $pdo->query('PRAGMA user_version')->fetchColumn() >= SCHEMA_VERSION) return;
+    $version = (int) $pdo->query('PRAGMA user_version')->fetchColumn();
+    if ($version >= SCHEMA_VERSION) return;
 
     $add = function (string $table, string $col, string $def) use ($pdo) {
         $cols = array_column($pdo->query("PRAGMA table_info(\"$table\")")->fetchAll(), 'name');
         if (!in_array($col, $cols, true)) $pdo->exec("ALTER TABLE \"$table\" ADD COLUMN \"$col\" $def");
     };
+    if ($version < 2) {
     foreach ([
         ['brand', "TEXT NOT NULL DEFAULT ''"], ['color', "TEXT NOT NULL DEFAULT ''"],
         ['measurements', "TEXT NOT NULL DEFAULT ''"], ['flaws', "TEXT NOT NULL DEFAULT ''"],
@@ -51,6 +55,37 @@ CREATE TABLE IF NOT EXISTS "Review" (
 );
 CREATE TABLE IF NOT EXISTS "Meta" ("key" TEXT PRIMARY KEY, "value" TEXT NOT NULL);
 SQL);
+    }
+
+    if ($version < 3) {
+        foreach ([
+            ['fit', "TEXT NOT NULL DEFAULT ''"], ['fabric', "TEXT NOT NULL DEFAULT ''"], ['modelInfo', "TEXT NOT NULL DEFAULT ''"],
+            ['era', "TEXT NOT NULL DEFAULT ''"], ['tags', "TEXT NOT NULL DEFAULT ''"], ['cost', 'INTEGER NOT NULL DEFAULT 0'],
+        ] as [$c, $d]) $add('Product', $c, $d);
+        foreach ([
+            ['notes', "TEXT NOT NULL DEFAULT ''"], ['giftWrap', 'INTEGER NOT NULL DEFAULT 0'], ['giftWrapFee', 'INTEGER NOT NULL DEFAULT 0'],
+            ['deliveryMethod', "TEXT NOT NULL DEFAULT 'delivery'"], ['reminderSent', 'INTEGER NOT NULL DEFAULT 0'],
+        ] as [$c, $d]) $add('Order', $c, $d);
+        foreach ([
+            ['giftWrapPrice', 'INTEGER NOT NULL DEFAULT 1000'], ['pickupEnabled', 'INTEGER NOT NULL DEFAULT 0'],
+            ['pickupAddress', "TEXT NOT NULL DEFAULT ''"], ['returnsPolicy', "TEXT NOT NULL DEFAULT ''"],
+            ['termsText', "TEXT NOT NULL DEFAULT ''"], ['privacyText', "TEXT NOT NULL DEFAULT ''"],
+            ['sizeGuide', "TEXT NOT NULL DEFAULT ''"], ['gaId', "TEXT NOT NULL DEFAULT ''"], ['metaPixelId', "TEXT NOT NULL DEFAULT ''"],
+            ['offersEnabled', 'INTEGER NOT NULL DEFAULT 1'],
+        ] as [$c, $d]) $add('SiteSettings', $c, $d);
+        $add('DiscountCode', 'productId', 'TEXT');
+        $pdo->exec(<<<SQL
+CREATE TABLE IF NOT EXISTS "Offer" (
+  "id" TEXT PRIMARY KEY, "productId" TEXT NOT NULL, "name" TEXT NOT NULL, "email" TEXT NOT NULL, "phone" TEXT NOT NULL,
+  "amount" INTEGER NOT NULL, "status" TEXT NOT NULL DEFAULT 'new', "code" TEXT, "createdAt" INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "SellRequest" (
+  "id" TEXT PRIMARY KEY, "name" TEXT NOT NULL, "phone" TEXT NOT NULL, "email" TEXT NOT NULL DEFAULT '',
+  "description" TEXT NOT NULL, "askingPrice" INTEGER NOT NULL DEFAULT 0, "photos" TEXT NOT NULL DEFAULT '[]',
+  "status" TEXT NOT NULL DEFAULT 'new', "createdAt" INTEGER NOT NULL
+);
+SQL);
+    }
     $pdo->exec('PRAGMA user_version = ' . SCHEMA_VERSION);
 }
 
@@ -80,7 +115,7 @@ function delivery_fee(string $state, int $subtotal): int
 }
 
 /** Returns [discountKobo, normalisedCode] or throws with a shopper-friendly message. */
-function apply_discount(string $code, int $subtotal): array
+function apply_discount(string $code, int $subtotal, array $productIds = []): array
 {
     $code = strtoupper(trim($code));
     if ($code === '') return [0, null];
@@ -90,6 +125,7 @@ function apply_discount(string $code, int $subtotal): array
     if (!$d || !$d['active']) throw new InvalidArgumentException('That discount code is not valid');
     if ($d['expiresAt'] && (int) $d['expiresAt'] < now_ms()) throw new InvalidArgumentException('That discount code has expired');
     if ($d['maxUses'] > 0 && $d['uses'] >= $d['maxUses']) throw new InvalidArgumentException('That discount code has been fully used');
+    if (!empty($d['productId']) && !in_array($d['productId'], $productIds, true)) throw new InvalidArgumentException('This code only works with the item your offer was for');
     if ($subtotal < (int) $d['minOrder'] * 100) throw new InvalidArgumentException('This code needs a minimum order of ' . naira((int) $d['minOrder'] * 100));
     $amount = $d['kind'] === 'percent'
         ? (int) round($subtotal * min(100, (int) $d['value']) / 100)
@@ -151,6 +187,7 @@ function notify_order(array $o, string $event): void
     $name = e($o['customerName']);
     $method = $o['paymentMethod'] ?? 'paystack';
     if ($event === 'placed') {
+        telegram_alert(order_alert_text($o));
         $intro = match (true) {
             $o['status'] === 'paid' => "<p>Hi $name, thank you! Your payment was successful and we're packing your thrift finds.</p>",
             $method === 'transfer' => "<p>Hi $name, thanks for your order! Please transfer <strong>" . naira((int) $o['totalAmount']) . '</strong> to:</p><p style="white-space:pre-line;background:#F6EDE8;padding:12px">' . e($s['bankDetails']) . '</p><p>Use your order reference as the narration. Your items are held for you for 48 hours.</p>',
@@ -298,4 +335,109 @@ function admin_base(): string
 {
     $p = '/' . trim((string) config('ADMIN_PATH', '/admin'), '/');
     return $p === '/' ? '/admin' : $p;
+}
+
+// ---------- Telegram alerts to the owner (optional: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in config.php) ----------
+
+function telegram_alert(string $text): void
+{
+    $token = (string) config('TELEGRAM_BOT_TOKEN', '');
+    $chat = (string) config('TELEGRAM_CHAT_ID', '');
+    if ($token === '' || $chat === '' || !function_exists('curl_init')) return;
+    $ch = curl_init('https://api.telegram.org/bot' . $token . '/sendMessage');
+    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10, CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => ['chat_id' => $chat, 'text' => mb_substr($text, 0, 3500), 'disable_web_page_preview' => 'true']]);
+    if (curl_exec($ch) === false) log_error('Telegram alert failed', curl_error($ch));
+    curl_close($ch);
+}
+
+function order_alert_text(array $o): string
+{
+    $lines = array_map(fn($i) => '• ' . $i['product']['name'] . ' × ' . $i['quantity'], $o['items']);
+    return '🛍 New order ' . $o['reference'] . "\n" . $o['customerName'] . ' · ' . $o['customerPhone'] . "\n"
+        . implode("\n", $lines) . "\nTotal: " . naira((int) $o['totalAmount']) . ' · ' . (PAYMENT_LABELS[$o['paymentMethod']] ?? $o['paymentMethod'])
+        . ' · ' . ($o['deliveryMethod'] === 'pickup' ? 'Pickup' : $o['city'] . ', ' . $o['state'])
+        . ($o['notes'] !== '' ? "\nNote: " . $o['notes'] : '') . ($o['giftWrap'] ? "\n🎁 Gift wrap" : '');
+}
+
+// ---------- background jobs, run from page views (no cron needed) ----------
+
+/** Runs at most every 10 minutes: expires unpaid transfers, sends cart reminders, sends the daily summary. */
+function run_maintenance(): void
+{
+    $last = (int) (meta_get('maint_at') ?? 0);
+    if (time() - $last < 600) return;
+    meta_set('maint_at', (string) time());
+    require_once __DIR__ . '/api.php';
+    $pdo = db();
+    $now = now_ms();
+
+    // 1. Bank transfers unpaid after 48 hours: cancel and put the pieces back on sale.
+    $st = $pdo->prepare("SELECT id FROM \"Order\" WHERE status = 'awaiting' AND paymentMethod = 'transfer' AND createdAt < ?");
+    $st->execute([$now - 48 * 3600 * 1000]);
+    foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $id) {
+        $o = order_with_items('id = ?', [$id]);
+        $pdo->prepare("UPDATE \"Order\" SET status = 'cancelled', updatedAt = ? WHERE id = ? AND status = 'awaiting'")->execute([$now, $id]);
+        $ids = array_column($o['items'], 'productId');
+        if ($ids) $pdo->prepare('UPDATE Product SET reservedUntil = NULL WHERE inStock = 1 AND id IN (' . rtrim(str_repeat('?,', count($ids)), ',') . ')')->execute($ids);
+        admin_log('order_auto_cancel', $o['reference'] . ' (no transfer after 48h)');
+        send_mail($o['customerEmail'], 'Your order ' . $o['reference'] . ' was cancelled',
+            '<p>Hi ' . e($o['customerName']) . ', we didn\'t receive your bank transfer within 48 hours, so your order has been cancelled and the pieces released. If you already paid, reply to this email with your receipt.</p>');
+    }
+
+    // 2. Abandoned checkout: Paystack started but never paid, 1–24 hours ago. One reminder per order.
+    $st = $pdo->prepare("SELECT id FROM \"Order\" WHERE status IN ('pending', 'failed') AND paymentMethod = 'paystack' AND reminderSent = 0 AND createdAt BETWEEN ? AND ?");
+    $st->execute([$now - 24 * 3600 * 1000, $now - 3600 * 1000]);
+    foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $id) {
+        $o = order_with_items('id = ?', [$id]);
+        $pdo->prepare('UPDATE "Order" SET reminderSent = 1 WHERE id = ?')->execute([$id]);
+        // Skip shoppers who came back and paid on a newer order.
+        $paid = $pdo->prepare("SELECT 1 FROM \"Order\" WHERE customerEmail = ? AND status = 'paid' AND createdAt > ?");
+        $paid->execute([$o['customerEmail'], (int) $o['createdAt']]);
+        if ($paid->fetchColumn()) continue;
+        $links = '';
+        foreach ($o['items'] as $i) {
+            $p = fetch_products('id = ?', [$i['productId']], '');
+            if ($p && product_availability($p[0]) === 'available') {
+                $links .= '<li><a href="' . e(app_url() . '/product/' . rawurlencode($p[0]['slug'])) . '">' . e($p[0]['name']) . '</a> — ' . naira((int) $p[0]['salePrice']) . '</li>';
+            }
+        }
+        if ($links === '') continue;
+        send_mail($o['customerEmail'], 'Still thinking about it?',
+            '<p>Hi ' . e($o['customerName']) . ', you didn\'t finish checking out. These one-of-one pieces are still available — but not for long:</p><ul>' . $links . '</ul>');
+    }
+
+    // 3. Daily summary to the owner, once a day after 8am Lagos time.
+    $today = date('Y-m-d');
+    $s = settings();
+    if ((int) date('G') >= 8 && meta_get('summary_day') !== $today) {
+        meta_set('summary_day', $today);
+        $since = strtotime('yesterday') * 1000;
+        $until = strtotime('today') * 1000;
+        $q = $pdo->prepare("SELECT COUNT(*), COALESCE(SUM(totalAmount), 0) FROM \"Order\" WHERE status = 'paid' AND createdAt BETWEEN ? AND ?");
+        $q->execute([$since, $until]);
+        [$n, $rev] = $q->fetch(PDO::FETCH_NUM);
+        $awaiting = (int) $pdo->query("SELECT COUNT(*) FROM \"Order\" WHERE status = 'awaiting'")->fetchColumn();
+        $toShip = (int) $pdo->query("SELECT COUNT(*) FROM \"Order\" WHERE status = 'paid' AND fulfillment IN ('new', 'packed')")->fetchColumn();
+        $offers = (int) $pdo->query("SELECT COUNT(*) FROM Offer WHERE status = 'new'")->fetchColumn();
+        $sell = (int) $pdo->query("SELECT COUNT(*) FROM SellRequest WHERE status = 'new'")->fetchColumn();
+        $text = 'Yesterday: ' . (int) $n . ' paid orders, ' . naira((int) $rev) . ".\nTo ship: $toShip · Awaiting payment: $awaiting · New offers: $offers · Sell requests: $sell";
+        if (filter_var($s['contactEmail'], FILTER_VALIDATE_EMAIL)) send_mail($s['contactEmail'], 'Daily summary — ' . date('j M'), '<p>' . nl2br(e($text)) . '</p><p><a href="' . e(app_url() . admin_base()) . '">Open admin</a></p>');
+        telegram_alert("📊 " . $text);
+    }
+}
+
+// ---------- default policy texts (shown until the owner edits them in Settings) ----------
+
+const DEFAULT_POLICIES = [
+    'returnsPolicy' => "Every piece is one-of-one and pre-loved, photographed honestly with any flaws shown.\n\n• If an item arrives significantly different from its description, message us within 48 hours of delivery with photos. We'll offer an exchange, store credit or refund.\n• Items must be unworn, unwashed and returned in the same condition.\n• Change-of-mind returns aren't accepted on sale items.\n• Refunds are made to your original payment method within 7 working days of us receiving the item.\n• Return delivery costs are covered by us only when the item was not as described.",
+    'termsText' => "By ordering from us you agree to these terms.\n\n• Prices are in Nigerian Naira and include VAT where applicable.\n• Items are reserved only once checkout starts, and released if payment isn't completed.\n• Bank transfer orders are held for 48 hours.\n• Delivery times are estimates; we'll keep you updated by email and WhatsApp.\n• We may cancel an order and refund you in full if an item is unavailable.",
+    'privacyText' => "We collect only what we need to deliver your order: your name, email, phone and address.\n\n• Payments are processed by Paystack; we never see or store your card details.\n• We use your contact details to update you about your order and, if you sign up, about new drops.\n• We never sell your data. You can unsubscribe from emails at any time.\n• To have your data deleted, contact us.",
+    'sizeGuide' => "Measurements are taken with the garment laid flat. Double the chest/waist figure for the full circumference.\n\nSize | Chest (cm) | Waist (cm) | Hips (cm)\nXS | 80–84 | 62–66 | 86–90\nS | 85–89 | 67–71 | 91–95\nM | 90–95 | 72–77 | 96–101\nL | 96–102 | 78–84 | 102–108\nXL | 103–110 | 85–92 | 109–116\n\nVintage sizes often run smaller than modern ones — check each item's measurements and fit notes.",
+];
+
+function policy_text(string $key): string
+{
+    $v = trim((string) (settings()[$key] ?? ''));
+    return $v !== '' ? $v : DEFAULT_POLICIES[$key];
 }

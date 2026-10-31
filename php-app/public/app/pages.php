@@ -119,6 +119,9 @@ function page_shop(): void
     $min = max(0, (int) ($_GET['min'] ?? 0));
     $max = max(0, (int) ($_GET['max'] ?? 0));
     $showSold = ($_GET['sold'] ?? '1') !== '0';
+    $search = mb_substr(trim((string) ($_GET['q'] ?? '')), 0, 80);
+    $era = in_array($_GET['era'] ?? '', ERAS, true) ? $_GET['era'] : '';
+    $tag = isset(PRODUCT_TAGS[$_GET['tag'] ?? '']) ? $_GET['tag'] : '';
 
     // Sold pieces stay visible (marked "Sold") so the shop looks active; available pieces come first.
     $where = published_sql() . ($showSold ? '' : ' AND inStock = 1');
@@ -127,6 +130,13 @@ function page_shop(): void
     elseif ($category !== 'all') { $where .= ' AND category = ?'; $params[] = $category; }
     if ($brand !== '') { $where .= ' AND brand = ? COLLATE NOCASE'; $params[] = $brand; }
     if ($color !== '') { $where .= ' AND color = ? COLLATE NOCASE'; $params[] = $color; }
+    if ($search !== '') {
+        $where .= " AND (name LIKE ? ESCAPE '\\' OR brand LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' OR color LIKE ? ESCAPE '\\' OR category LIKE ? ESCAPE '\\')";
+        $like = '%' . addcslashes($search, '%_\\') . '%';
+        array_push($params, $like, $like, $like, $like, $like);
+    }
+    if ($era !== '') { $where .= ' AND era = ?'; $params[] = $era; }
+    if ($tag !== '') { $where .= " AND (',' || tags || ',') LIKE ?"; $params[] = '%,' . $tag . ',%'; }
     if ($min > 0) { $where .= ' AND salePrice >= ?'; $params[] = $min * 100; }
     if ($max > 0) { $where .= ' AND salePrice <= ?'; $params[] = $max * 100; }
     $order = 'ORDER BY inStock DESC, ' . ['new' => 'createdAt DESC', 'price_asc' => 'salePrice ASC', 'price_desc' => 'salePrice DESC'][$sort];
@@ -135,7 +145,7 @@ function page_shop(): void
     $products = fetch_products($where, $params, $order . ' LIMIT ' . $pageSize . ' OFFSET ' . (($page - 1) * $pageSize));
     $totalPages = max(1, (int) ceil($total / $pageSize));
 
-    $query = array_filter(['brand' => $brand, 'color' => $color, 'sort' => $sort === 'new' ? '' : $sort, 'min' => $min ?: '', 'max' => $max ?: '', 'sold' => $showSold ? '' : '0'], fn($v) => $v !== '');
+    $query = array_filter(['q' => $search, 'era' => $era, 'tag' => $tag, 'brand' => $brand, 'color' => $color, 'sort' => $sort === 'new' ? '' : $sort, 'min' => $min ?: '', 'max' => $max ?: '', 'sold' => $showSold ? '' : '0'], fn($v) => $v !== '');
     $href = function (array $over) use ($category, $query): string {
         $q = array_filter(array_merge($category !== 'all' ? ['category' => $category] : [], $query, $over), fn($v) => $v !== '' && $v !== null);
         return $q ? '/shop?' . http_build_query($q) : '/shop';
@@ -160,7 +170,10 @@ function page_shop(): void
     $colors = distinct_values('color');
     $filters = '<form method="get" action="/shop" class="mt-6 flex flex-wrap items-end gap-3 rounded-2xl bg-white p-4 ring-1 ring-sand/60" data-autosubmit>'
         . ($category !== 'all' ? '<input type="hidden" name="category" value="' . e($category) . '">' : '')
+        . '<label class="flex flex-col text-xs font-medium text-warmgray">Search<input name="q" type="search" value="' . e($search) . '" placeholder="Denim, Nike, red…" class="mt-1 w-44 rounded-xl border border-sand px-3 py-2 text-sm text-charcoal"></label>'
         . $select('sort', 'Sort', SHOP_SORTS, $sort)
+        . $select('era', 'Era', ['' => 'Any era'] + array_combine(ERAS, ERAS), $era)
+        . $select('tag', 'Type', ['' => 'All pieces'] + PRODUCT_TAGS, $tag)
         . ($brands ? $select('brand', 'Brand', ['' => 'All brands'] + array_combine($brands, $brands), $brand) : '')
         . ($colors ? $select('color', 'Colour', ['' => 'All colours'] + array_combine($colors, $colors), $color) : '')
         . '<label class="flex flex-col text-xs font-medium text-warmgray">Min ₦<input name="min" type="number" min="0" step="500" value="' . ($min ?: '') . '" class="mt-1 w-28 rounded-xl border border-sand px-3 py-2 text-sm text-charcoal"></label>'
@@ -181,7 +194,7 @@ function page_shop(): void
 
     $body = '<div class="mx-auto max-w-6xl px-4 py-10 sm:px-6">'
         . '<div class="max-w-xl"><h1 class="font-display text-3xl font-semibold sm:text-4xl">Shop all</h1>'
-        . '<p class="mt-2 text-warmgray">Browse our full collection of curated thrift — updated weekly.</p></div>'
+        . '<p class="mt-2 text-warmgray">' . ($search !== '' ? 'Results for “' . e($search) . '”' : 'Browse our full collection of curated thrift — updated weekly.') . '</p></div>'
         . '<div class="relative mt-8"><div class="flex gap-2 overflow-x-auto pb-2">' . $pills . '</div>'
         . '<div class="pointer-events-none absolute inset-y-0 right-0 w-10 bg-gradient-to-l from-cream to-transparent"></div></div>'
         . $filters
@@ -240,11 +253,24 @@ function page_product(string $slug): void
             'imageUrl' => $p['imageUrl'], 'size' => $p['size'],
         ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
         $cta = '<button type="button" data-add-to-cart="' . $data . '" class="' . btn_class('primary', true) . '">Add to cart</button>' . $waBtn;
+        if ($s['offersEnabled']) {
+            $in = 'w-full rounded-xl border border-sand bg-white px-3 py-2 text-sm focus:border-terracotta focus:outline-none';
+            $cta .= '<details class="mt-4 rounded-xl bg-white p-4 ring-1 ring-sand/60"><summary class="cursor-pointer text-sm font-semibold">Make an offer</summary>'
+                . '<form data-offer="' . e($p['id']) . '" class="mt-3 grid gap-2 sm:grid-cols-2">'
+                . '<input name="amount" type="number" required min="' . (int) ceil($p['salePrice'] / 200) . '" max="' . (int) ($p['salePrice'] / 100 - 1) . '" placeholder="Your offer (₦)" class="' . $in . ' sm:col-span-2">'
+                . '<input name="name" required maxlength="80" placeholder="Name" class="' . $in . '"><input name="phone" required maxlength="30" placeholder="WhatsApp number" class="' . $in . '">'
+                . '<input name="email" type="email" required placeholder="Email" class="' . $in . ' sm:col-span-2">'
+                . '<button type="submit" class="rounded-full bg-charcoal px-4 py-2 text-sm font-semibold text-cream sm:col-span-2">Send offer</button>'
+                . '<p data-offer-msg class="hidden text-sm sm:col-span-2"></p></form>'
+                . '<p class="mt-2 text-xs text-warmgray">If we accept, you get a code to buy it at your price within 48 hours.</p></details>';
+        }
     }
 
     $details = [['Size', $p['size']], ['Condition', $p['condition']]];
     if ($p['brand'] !== '') $details[] = ['Brand', $p['brand']];
     if ($p['color'] !== '') $details[] = ['Colour', $p['color']];
+    if ($p['era'] !== '') $details[] = ['Era', $p['era']];
+    if ($p['fabric'] !== '') $details[] = ['Fabric & care', $p['fabric']];
     $dl = '';
     foreach ($details as [$k, $v]) $dl .= '<div><dt class="text-xs uppercase text-warmgray">' . e($k) . '</dt><dd class="mt-1 font-medium">' . e($v) . '</dd></div>';
 
@@ -272,6 +298,13 @@ function page_product(string $slug): void
       <h1 class="mt-2 font-display text-3xl font-semibold sm:text-4xl"><?= e($p['name']) ?></h1>
       <div class="mt-4"><?= price_html((int) $p['originalPrice'], (int) $p['salePrice'], 'lg') ?></div>
       <dl class="mt-6 grid grid-cols-2 gap-4 rounded-xl bg-white p-4 ring-1 ring-sand/60"><?= $dl ?></dl>
+      <?php if ($p['tags'] !== ''): ?><div class="mt-4 flex flex-wrap gap-2"><?php foreach (explode(',', $p['tags']) as $t): if (isset(PRODUCT_TAGS[$t])): ?><a href="/shop?tag=<?= e($t) ?>" class="rounded-full bg-terracotta/10 px-3 py-1 text-xs font-semibold text-terracotta"><?= e(PRODUCT_TAGS[$t]) ?></a><?php endif; endforeach; ?></div><?php endif; ?>
+      <?php if (trim($p['fit']) !== '' || trim($p['modelInfo']) !== ''): ?>
+      <div class="mt-4 rounded-xl bg-white p-4 text-sm ring-1 ring-sand/60"><p class="text-xs font-semibold uppercase text-warmgray">Fit</p>
+        <?php if (trim($p['fit']) !== ''): ?><p class="mt-1"><?= e($p['fit']) ?></p><?php endif; ?>
+        <?php if (trim($p['modelInfo']) !== ''): ?><p class="mt-1 text-warmgray"><?= e($p['modelInfo']) ?></p><?php endif; ?>
+      </div>
+      <?php endif; ?>
       <?php if (trim($p['measurements']) !== ''): ?>
       <div class="mt-4 rounded-xl bg-white p-4 ring-1 ring-sand/60"><p class="text-xs font-semibold uppercase text-warmgray">Measurements (laid flat)</p><p class="mt-1 whitespace-pre-line text-sm"><?= e($p['measurements']) ?></p></div>
       <?php endif; ?>
@@ -279,7 +312,7 @@ function page_product(string $slug): void
       <div class="mt-4 flex gap-3 rounded-xl bg-olive/10 p-4 text-sm"><?= icon('alert', 'mt-0.5 h-4 w-4 shrink-0 text-olive') ?><div><p class="font-semibold text-olive">Honest condition notes</p><p class="mt-1 whitespace-pre-line text-charcoal"><?= e($p['flaws']) ?></p></div></div>
       <?php endif; ?>
       <p class="mt-6 whitespace-pre-line leading-relaxed text-warmgray"><?= e($p['description']) ?></p>
-      <p class="mt-4 text-sm text-warmgray">One-of-one thrift piece. Delivery across Nigeria — fee shown at checkout.</p>
+      <p class="mt-4 text-sm text-warmgray">One-of-one thrift piece. Delivery across Nigeria — fee shown at checkout. <a href="/size-guide" class="underline">Size guide</a> · <a href="/returns" class="underline">Returns</a></p>
       <div class="mt-8"><?= $cta ?></div>
     </div>
   </div>
@@ -343,6 +376,17 @@ function page_checkout(): void
           <div><label for="state" class="block text-sm font-medium">State</label><select id="state" name="state" required class="<?= $input ?>"><?= $opts ?></select></div>
         </div>
         <p class="text-xs text-warmgray">Delivery: <?= naira((int) $s['deliveryLagos'] * 100) ?> within Lagos · <?= naira((int) $s['deliveryOther'] * 100) ?> other states<?= $freeOver > 0 ? ' · Free on orders over ' . naira($freeOver * 100) : '' ?></p>
+        <?php if ($s['pickupEnabled']): ?>
+        <div class="space-y-3"><p class="text-sm font-medium">Delivery or pickup?</p>
+          <label class="flex cursor-pointer gap-3 rounded-xl border border-sand bg-white p-3 has-[:checked]:border-terracotta"><input type="radio" name="deliveryMethod" value="delivery" checked class="accent-terracotta"><span class="text-sm">Deliver to my address</span></label>
+          <label class="flex cursor-pointer gap-3 rounded-xl border border-sand bg-white p-3 has-[:checked]:border-terracotta"><input type="radio" name="deliveryMethod" value="pickup" class="accent-terracotta"><span class="text-sm">Free pickup — <?= e($s['pickupAddress'] ?: $s['contactAddress']) ?></span></label>
+        </div>
+        <?php endif; ?>
+        <div><label for="notes" class="block text-sm font-medium">Order note (optional)</label><textarea id="notes" name="notes" rows="2" maxlength="500" class="<?= $input ?>" placeholder="e.g. Call before delivery"></textarea></div>
+        <?php if ((int) $s['giftWrapPrice'] > 0): ?>
+        <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="giftWrap" value="1" class="accent-terracotta"> 🎁 Gift wrap (+<?= naira((int) $s['giftWrapPrice'] * 100) ?>)</label>
+        <?php endif; ?>
+        <label class="flex items-center gap-2 text-xs text-warmgray"><input type="checkbox" id="remember-details" checked> Remember my details on this device</label>
         <h2 class="pt-4 font-display text-lg font-semibold">Payment</h2>
         <div class="space-y-3"><?= $methodHtml ?></div>
       </div>
@@ -359,10 +403,12 @@ function page_checkout(): void
           <div class="flex justify-between"><dt class="text-warmgray">Subtotal</dt><dd id="checkout-subtotal"></dd></div>
           <div class="flex justify-between"><dt class="text-warmgray">Delivery</dt><dd id="checkout-delivery" class="text-warmgray">Select your state</dd></div>
           <div id="checkout-discount-row" class="hidden justify-between text-olive"><dt>Discount</dt><dd id="checkout-discount"></dd></div>
+          <div id="checkout-wrap-row" class="hidden justify-between"><dt class="text-warmgray">Gift wrap</dt><dd id="checkout-wrap"></dd></div>
         </dl>
         <div class="mt-4 flex justify-between border-t border-sand pt-4 font-semibold"><span>Total</span><span id="checkout-total" class="text-terracotta"></span></div>
         <p id="checkout-unavailable" class="mt-4 hidden items-start gap-2 rounded-lg bg-rust/10 px-3 py-2 text-sm text-rust"><?= icon('alert', 'mt-0.5 h-4 w-4 shrink-0') ?> Some items in your cart just sold or are being purchased by someone else. Remove them to continue.</p>
         <p id="checkout-error" class="mt-4 hidden rounded-lg bg-rust/10 px-3 py-2 text-sm text-rust"></p>
+        <p class="mt-4 text-xs text-warmgray">By ordering you agree to our <a href="/terms" class="underline">terms</a> and <a href="/returns" class="underline">returns policy</a>.</p>
         <button type="submit" id="checkout-submit" class="<?= btn_class('primary', true, 'mt-6') ?>" disabled>Checking availability…</button>
       </div>
     </form>
@@ -497,4 +543,47 @@ function product_feed_csv(): void
         ]);
     }
     fclose($out);
+}
+
+function page_policy(string $key, string $title): void
+{
+    $text = policy_text($key);
+    $html = '';
+    foreach (preg_split('/\n{2,}/', $text) as $block) {
+        $lines = explode("\n", trim($block));
+        if (count($lines) > 1 && str_contains($lines[0], '|')) {
+            $rows = '';
+            foreach ($lines as $i => $line) {
+                $cells = array_map('trim', explode('|', $line));
+                $tag = $i === 0 ? 'th' : 'td';
+                $rows .= '<tr>' . implode('', array_map(fn($c) => "<$tag class=\"border border-sand px-3 py-2 text-left\">" . e($c) . "</$tag>", $cells)) . '</tr>';
+            }
+            $html .= '<div class="overflow-x-auto"><table class="mt-4 w-full border-collapse bg-white text-sm">' . $rows . '</table></div>';
+        } elseif (str_starts_with(ltrim($lines[0]), '•')) {
+            $html .= '<ul class="mt-4 list-disc space-y-2 pl-5">' . implode('', array_map(fn($l) => '<li>' . e(ltrim($l, "• ")) . '</li>', $lines)) . '</ul>';
+        } else {
+            $html .= '<p class="mt-4 whitespace-pre-line">' . e(trim($block)) . '</p>';
+        }
+    }
+    render_store('<div class="mx-auto max-w-3xl px-4 py-12 sm:px-6"><h1 class="font-display text-3xl font-semibold sm:text-4xl">' . e($title) . '</h1>'
+        . '<div class="mt-4 leading-relaxed text-charcoal">' . $html . '</div>'
+        . '<p class="mt-10 text-sm text-warmgray">Questions? <a href="/contact" class="text-terracotta underline">Contact us</a>.</p></div>', ['title' => $title]);
+}
+
+function page_sell(): void
+{
+    $in = 'mt-1 w-full rounded-xl border border-sand bg-white px-4 py-3 text-sm focus:border-terracotta focus:outline-none';
+    $body = '<div class="mx-auto max-w-xl px-4 py-12 sm:px-6">'
+        . '<h1 class="font-display text-3xl font-semibold sm:text-4xl">Sell to us</h1>'
+        . '<p class="mt-3 text-warmgray">Got quality pre-loved pieces? Tell us about them — we buy outright or swap for store credit. Clean, good-condition items only.</p>'
+        . '<form id="sell-form" class="mt-8 space-y-4" enctype="multipart/form-data">'
+        . '<div class="grid gap-4 sm:grid-cols-2"><div><label class="text-sm font-medium" for="s-name">Name</label><input id="s-name" name="name" required maxlength="80" class="' . $in . '"></div>'
+        . '<div><label class="text-sm font-medium" for="s-phone">WhatsApp number</label><input id="s-phone" name="phone" required maxlength="30" class="' . $in . '"></div></div>'
+        . '<div><label class="text-sm font-medium" for="s-email">Email (optional)</label><input id="s-email" name="email" type="email" class="' . $in . '"></div>'
+        . '<div><label class="text-sm font-medium" for="s-desc">What are you selling?</label><textarea id="s-desc" name="description" required rows="4" maxlength="2000" placeholder="e.g. 5 pieces: Levi\'s 501 jeans W30, Zara blazer M…" class="' . $in . '"></textarea></div>'
+        . '<div><label class="text-sm font-medium" for="s-price">Asking price for all (₦, optional)</label><input id="s-price" name="askingPrice" type="number" min="0" class="' . $in . '"></div>'
+        . '<div><label class="text-sm font-medium" for="s-photos">Photos (up to 4)</label><input id="s-photos" name="photos[]" type="file" multiple accept="image/jpeg,image/png,image/webp" class="mt-1 block w-full text-sm"></div>'
+        . '<p data-sell-msg class="hidden text-sm"></p>'
+        . '<button type="submit" class="' . btn_class('primary', true) . '">Send</button></form></div>';
+    render_store($body, ['title' => 'Sell to us']);
 }

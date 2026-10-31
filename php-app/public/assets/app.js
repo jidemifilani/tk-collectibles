@@ -194,6 +194,8 @@
     var idemKey = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + Math.random();
     var submit = $("#checkout-submit");
 
+    function wrapOn() { var g = checkoutForm.elements.giftWrap; return !!(g && g.checked); }
+    function deliveryMethod() { var d = checkoutForm.querySelector('input[name="deliveryMethod"]:checked'); return d ? d.value : "delivery"; }
     function method() { var m = checkoutForm.querySelector('input[name="paymentMethod"]:checked'); return m ? m.value : "paystack"; }
     function cartLines() { return Cart.items().map(function (i) { return { productId: i.productId, quantity: i.quantity, size: i.size }; }); }
 
@@ -217,6 +219,10 @@
       var dRow = $("#checkout-discount-row");
       dRow.classList.toggle("hidden", !discount); dRow.classList.toggle("flex", !!discount);
       $("#checkout-discount").textContent = "−" + naira(discount);
+      var wrap = quote ? quote.giftWrap : 0;
+      var wRow = $("#checkout-wrap-row");
+      wRow.classList.toggle("hidden", !wrap); wRow.classList.toggle("flex", !!wrap);
+      $("#checkout-wrap").textContent = naira(wrap || 0);
       $("#checkout-total").textContent = naira(quote ? quote.total : subtotal);
       var warn = $("#checkout-unavailable");
       warn.classList.toggle("hidden", unavailable.length === 0);
@@ -230,7 +236,7 @@
     function refreshQuote() {
       return fetch("/api/checkout/quote", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: cartLines(), state: checkoutForm.elements.state.value, discountCode: appliedCode })
+        body: JSON.stringify({ items: cartLines(), state: checkoutForm.elements.state.value, discountCode: appliedCode, giftWrap: wrapOn(), deliveryMethod: deliveryMethod() })
       }).then(function (r) { return r.json(); }).then(function (d) {
         quote = d;
         var msg = $("#discount-msg");
@@ -253,6 +259,24 @@
       refreshQuote();
     });
     checkoutForm.elements.state.addEventListener("change", refreshQuote);
+    if (checkoutForm.elements.giftWrap) checkoutForm.elements.giftWrap.addEventListener("change", refreshQuote);
+    $all('input[name="deliveryMethod"]', checkoutForm).forEach(function (r) {
+      r.addEventListener("change", function () {
+        var pickup = deliveryMethod() === "pickup";
+        ["address", "city", "state"].forEach(function (n) {
+          var el = checkoutForm.elements[n];
+          el.required = !pickup;
+          el.closest("div").classList.toggle("hidden", pickup);
+        });
+        refreshQuote();
+      });
+    });
+    // Saved delivery details (this device only).
+    var SAVED = "tk-checkout-details", FIELDS = ["name", "email", "phone", "address", "city", "state"];
+    try {
+      var saved = JSON.parse(store(SAVED) || "null");
+      if (saved) FIELDS.forEach(function (k) { if (saved[k] && !checkoutForm.elements[k].value) checkoutForm.elements[k].value = saved[k]; });
+    } catch (e) {}
     $all('input[name="paymentMethod"]', checkoutForm).forEach(function (r) { r.addEventListener("change", renderCheckout); });
     $("#discount-apply").addEventListener("click", function () {
       appliedCode = $("#discount").value.trim().toUpperCase();
@@ -280,6 +304,9 @@
       err.classList.add("hidden");
       submitting = true; renderCheckout();
       var f = new FormData(checkoutForm);
+      var remember = $("#remember-details");
+      if (remember && remember.checked) { var keep = {}; FIELDS.forEach(function (k) { keep[k] = f.get(k) || ""; }); store(SAVED, JSON.stringify(keep)); }
+      else store(SAVED, null);
       var m = method();
       fetch(m === "paystack" ? "/api/paystack/initialize" : "/api/order/place", {
         method: "POST",
@@ -287,7 +314,8 @@
         body: JSON.stringify({
           customerName: f.get("name"), customerEmail: f.get("email"), customerPhone: f.get("phone"),
           shippingAddress: f.get("address"), city: f.get("city"), state: f.get("state"),
-          discountCode: appliedCode, paymentMethod: m, items: cartLines()
+          discountCode: appliedCode, paymentMethod: m, items: cartLines(),
+          notes: f.get("notes") || "", giftWrap: wrapOn(), deliveryMethod: deliveryMethod()
         })
       }).then(function (r) {
         return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || "Checkout failed"); return d; });
@@ -326,6 +354,7 @@
           return '<li class="flex justify-between"><span>' + esc(i.product.name) + " × " + i.quantity + " (" + esc(i.size) + ")</span><span>" + naira(i.price * i.quantity) + "</span></li>";
         }).join("");
         if (o.deliveryFee) lines += '<li class="flex justify-between text-warmgray"><span>Delivery</span><span>' + naira(o.deliveryFee) + "</span></li>";
+        if (o.giftWrapFee) lines += '<li class="flex justify-between text-warmgray"><span>Gift wrap</span><span>' + naira(o.giftWrapFee) + "</span></li>";
         if (o.discountAmount) lines += '<li class="flex justify-between text-olive"><span>Discount (' + esc(o.discountCode) + ")</span><span>−" + naira(o.discountAmount) + "</span></li>";
         var intro = paid
           ? "Hi " + esc(o.customerName) + ", your payment was successful. We&apos;ll pack your thrift finds and send delivery updates by email and WhatsApp."
@@ -622,5 +651,59 @@
         .then(function (sub) { render(sub ? "on" : "off"); })
         .catch(function () { render("unsupported"); });
     }
+  }
+
+  // ---------- header search ----------
+  var searchToggle = $("[data-search-toggle]");
+  if (searchToggle) searchToggle.addEventListener("click", function (e) {
+    e.preventDefault();
+    var bar = $("#search-bar");
+    bar.classList.toggle("hidden");
+    if (!bar.classList.contains("hidden")) $("#q").focus();
+  });
+
+  // ---------- make an offer ----------
+  $all("[data-offer]").forEach(function (form) {
+    var msg = $("[data-offer-msg]", form);
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var f = new FormData(form), btn = form.querySelector("button");
+      btn.disabled = true;
+      fetch("/api/offers", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productId: form.getAttribute("data-offer"), amount: Number(f.get("amount")), name: f.get("name"), phone: f.get("phone"), email: f.get("email") })
+      }).then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || "Could not send offer"); return d; }); })
+        .then(function (d) { form.reset(); msg.className = "text-sm text-olive sm:col-span-2"; msg.textContent = d.message; })
+        .catch(function (ex) { msg.className = "text-sm text-rust sm:col-span-2"; msg.textContent = ex.message; })
+        .then(function () { btn.disabled = false; });
+    });
+  });
+
+  // ---------- sell to us ----------
+  var sellForm = $("#sell-form");
+  if (sellForm) sellForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var msg = $("[data-sell-msg]", sellForm), btn = sellForm.querySelector("button[type=submit]");
+    btn.disabled = true; btn.textContent = "Sending…";
+    fetch("/api/sell", { method: "POST", body: new FormData(sellForm) })
+      .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || "Could not send"); return d; }); })
+      .then(function (d) { sellForm.reset(); msg.className = "text-sm text-olive"; msg.textContent = d.message; })
+      .catch(function (ex) { msg.className = "text-sm text-rust"; msg.textContent = ex.message; })
+      .then(function () { btn.disabled = false; btn.textContent = "Send"; });
+  });
+
+  // ---------- analytics (only when IDs are set in admin) ----------
+  function loadScript(src) { var s = document.createElement("script"); s.async = true; s.src = src; document.head.appendChild(s); }
+  if (/^G-[A-Z0-9]+$/.test(STORE.gaId || "")) {
+    window.dataLayer = window.dataLayer || [];
+    window.gtag = function () { window.dataLayer.push(arguments); };
+    gtag("js", new Date()); gtag("config", STORE.gaId);
+    loadScript("https://www.googletagmanager.com/gtag/js?id=" + encodeURIComponent(STORE.gaId));
+  }
+  if (/^\d+$/.test(STORE.pixelId || "")) {
+    var fbq = window.fbq = function () { fbq.callMethod ? fbq.callMethod.apply(fbq, arguments) : fbq.queue.push(arguments); };
+    fbq.push = fbq; fbq.loaded = true; fbq.version = "2.0"; fbq.queue = [];
+    fbq("init", STORE.pixelId); fbq("track", "PageView");
+    loadScript("https://connect.facebook.net/en_US/fbevents.js");
   }
 })();

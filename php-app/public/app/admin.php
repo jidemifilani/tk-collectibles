@@ -20,6 +20,8 @@ function render_admin(string $content, string $title, bool $withNav = true): voi
         '/admin' => ['dashboard', 'Dashboard'],
         '/admin/products' => ['shirt', 'Products'],
         '/admin/orders' => ['bag', 'Orders'],
+        '/admin/offers' => ['message', 'Offers'],
+        '/admin/sell' => ['shirt', 'Sell requests'],
         '/admin/discounts' => ['tag', 'Discount codes'],
         '/admin/reviews' => ['star', 'Reviews'],
         '/admin/settings' => ['palette', 'Theme & content'],
@@ -125,11 +127,18 @@ function admin_dashboard(): void
     [$weekRev, $weekCount] = $revenue(strtotime('monday this week') * 1000);
     [$monthRev, $monthCount] = $revenue(strtotime('first day of this month 00:00') * 1000);
     [$allRev] = $revenue(0);
+    $pr = $pdo->prepare('SELECT COALESCE(SUM(oi.price * oi.quantity - p.cost * oi.quantity), 0), COALESCE(SUM(CASE WHEN p.cost = 0 THEN 1 ELSE 0 END), 0) FROM OrderItem oi JOIN "Order" o ON o.id = oi.orderId JOIN Product p ON p.id = oi.productId WHERE o.status = \'paid\' AND o.createdAt >= ?');
+    $pr->execute([strtotime('first day of this month 00:00') * 1000]);
+    [$profit, $noCost] = $pr->fetch(PDO::FETCH_NUM);
+    $disc = $pdo->prepare('SELECT COALESCE(SUM(discountAmount), 0) FROM "Order" WHERE status = \'paid\' AND createdAt >= ?');
+    $disc->execute([strtotime('first day of this month 00:00') * 1000]);
+    $profit -= (int) $disc->fetchColumn(); // discounts and accepted offers come out of profit
     $stat = fn(string $label, string $value, string $sub) => '<div class="rounded-xl border border-gray-200 bg-white p-5"><p class="text-sm text-gray-500">' . e($label) . '</p><p class="mt-1 text-2xl font-semibold">' . $value . '</p><p class="text-xs text-gray-400">' . e($sub) . '</p></div>';
-    $salesHtml = '<div class="mt-8 grid gap-4 sm:grid-cols-3">'
+    $salesHtml = '<div class="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">'
         . $stat('Revenue this week', naira((int) $weekRev), $weekCount . ' paid orders')
         . $stat('Revenue this month', naira((int) $monthRev), $monthCount . ' paid orders')
-        . $stat('All-time revenue', naira((int) $allRev), 'Paid orders only') . '</div>';
+        . $stat('Profit this month', naira((int) $profit), (int) $noCost ? (int) $noCost . ' sold items have no cost entered' : 'Item price minus what you paid') . '</div>'
+        . '<p class="mt-2 text-xs text-gray-400">All-time revenue: ' . naira((int) $allRev) . '</p>';
 
     $best = $pdo->query('SELECT p.category, COUNT(*) n, SUM(oi.price * oi.quantity) amt FROM OrderItem oi JOIN "Order" o ON o.id = oi.orderId JOIN Product p ON p.id = oi.productId WHERE o.status = \'paid\' GROUP BY p.category ORDER BY amt DESC LIMIT 5')->fetchAll();
     $bestHtml = $best ? '<ul class="mt-3 space-y-2 text-sm">' . implode('', array_map(fn($b) => '<li class="flex justify-between"><span class="capitalize">' . e($b['category']) . ' · ' . (int) $b['n'] . ' sold</span><span class="font-medium">' . naira((int) $b['amt']) . '</span></li>', $best)) . '</ul>'
@@ -176,10 +185,20 @@ function admin_products_page(): void
             . '<td class="px-4 py-3 font-medium">' . naira((int) $p['salePrice']) . '</td>'
             . '<td class="px-4 py-3">' . $status . '</td>'
             . '<td class="px-4 py-3"><div class="flex gap-3"><a href="/admin/products/' . e($p['id']) . '" class="text-sm text-blue-600 hover:underline">Edit</a>'
+            . '<a href="/admin/products/new?from=' . e($p['id']) . '" class="text-sm text-gray-600 hover:underline">Duplicate</a>'
             . '<button type="button" data-delete-product="' . e($p['id']) . '" data-name="' . e($p['name']) . '" class="text-sm text-red-600 hover:underline">Delete</button></div></td></tr>';
     }
+    $dropCats = '<option value="">All categories</option>';
+    foreach (CATEGORIES as $cid => $cl) if ($cid !== 'all') $dropCats .= '<option value="' . $cid . '">' . $cl . '</option>';
+    $priceDrop = '<form id="price-drop" class="mt-6 flex flex-wrap items-end gap-3 rounded-xl border border-gray-200 bg-white p-4 text-sm">'
+        . '<p class="w-full font-medium">Bulk price drop</p>'
+        . '<label>Reduce by %<input name="percent" type="number" min="1" max="80" value="20" class="' . ADMIN_INPUT . ' w-24"></label>'
+        . '<label>Listed more than (days)<input name="olderThanDays" type="number" min="0" value="30" class="' . ADMIN_INPUT . ' w-28"></label>'
+        . '<label>Category<select name="category" class="' . ADMIN_INPUT . '">' . $dropCats . '</select></label>'
+        . '<button type="submit" class="rounded-lg bg-gray-900 px-4 py-2 font-medium text-white">Apply</button><p data-error class="hidden w-full text-red-600"></p></form>';
     $content = '<div class="flex items-center justify-between gap-4"><div><h1 class="text-2xl font-semibold">Products</h1><p class="text-gray-500">' . $total . ' items in catalog</p></div>'
         . '<div class="flex gap-2"><a href="/admin/products/bulk" class="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium hover:bg-gray-50">Bulk upload</a><a href="/admin/products/new" class="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800">+ Add product</a></div></div>'
+        . $priceDrop
         . '<div class="mt-8 overflow-x-auto rounded-xl border border-gray-200 bg-white"><table class="w-full min-w-[640px] text-left text-sm">'
         . '<thead class="border-b border-gray-200 bg-gray-50 text-xs uppercase text-gray-500"><tr><th class="px-4 py-3">Item</th><th class="px-4 py-3">Actual</th><th class="px-4 py-3">Discount</th><th class="px-4 py-3">Status</th><th class="px-4 py-3">Actions</th></tr></thead>'
         . '<tbody class="divide-y divide-gray-100">' . $rows . '</tbody></table></div>'
@@ -211,6 +230,20 @@ function image_field(string $name, string $label, string $value, string $variant
 function admin_product_form(?array $p = null): void
 {
     admin_guard_page();
+    $copy = false;
+    if (!$p && !empty($_GET['from'])) {
+        $src = fetch_products('id = ?', [(string) $_GET['from']], '');
+        if ($src) {
+            $p = $src[0];
+            $p['name'] .= ' (copy)';
+            unset($p['id']);
+            $p['slug'] = '';
+            $p['publishAt'] = null;
+            $p['inStock'] = 1;
+            $copy = true;
+        }
+    }
+    $isEdit = $p && !$copy;
     $catOpts = '';
     foreach (CATEGORIES as $id => $label) {
         if ($id === 'all') continue;
@@ -228,9 +261,9 @@ function admin_product_form(?array $p = null): void
     $checked = fn(bool $v) => $v ? ' checked' : '';
 
     $content = '<a href="/admin/products" class="text-sm text-gray-500 hover:text-gray-800">← Back to products</a>'
-        . '<h1 class="mt-2 text-2xl font-semibold">' . ($p ? 'Edit product' : 'Add product') . '</h1>'
-        . ($p ? '' : '<p class="mt-1 text-sm text-gray-500">In-stock items you add here send a "New arrival" notification to subscribed shoppers.</p>')
-        . '<form id="product-form" data-id="' . e($p['id'] ?? '') . '" class="mt-8 max-w-2xl space-y-5"><div class="grid gap-5 sm:grid-cols-2">'
+        . '<h1 class="mt-2 text-2xl font-semibold">' . ($isEdit ? 'Edit product' : 'Add product') . '</h1>'
+        . ($isEdit ? '' : '<p class="mt-1 text-sm text-gray-500">In-stock items you add here send a "New arrival" notification to subscribed shoppers.</p>')
+        . '<form id="product-form" data-id="' . e($isEdit ? $p['id'] : '') . '" class="mt-8 max-w-2xl space-y-5"><div class="grid gap-5 sm:grid-cols-2">'
         . '<div class="sm:col-span-2"><label class="block text-sm font-medium text-gray-700">Name</label><input name="name" required maxlength="200" value="' . e($p['name'] ?? '') . '" class="' . ADMIN_INPUT . '"></div>'
         . '<div><label class="block text-sm font-medium text-gray-700">Slug (optional)</label><input name="slug" value="' . e($p['slug'] ?? '') . '" class="' . ADMIN_INPUT . '"></div>'
         . '<div><label class="block text-sm font-medium text-gray-700">Category</label><select name="category" class="' . ADMIN_INPUT . '">' . $catOpts . '</select></div>'
@@ -240,6 +273,12 @@ function admin_product_form(?array $p = null): void
         . '<div><label class="block text-sm font-medium text-gray-700">Condition</label><select name="condition" class="' . ADMIN_INPUT . '">' . $condOpts . '</select></div>'
         . '<div><label class="block text-sm font-medium text-gray-700">Brand (optional)</label><input name="brand" maxlength="80" value="' . e($p['brand'] ?? '') . '" placeholder="Zara, Nike, vintage…" class="' . ADMIN_INPUT . '"></div>'
         . '<div><label class="block text-sm font-medium text-gray-700">Colour (optional)</label><input name="color" maxlength="40" value="' . e($p['color'] ?? '') . '" placeholder="Black" class="' . ADMIN_INPUT . '"></div>'
+        . '<div><label class="block text-sm font-medium text-gray-700">Era (optional)</label><select name="era" class="' . ADMIN_INPUT . '">' . '<option value="">—</option>' . implode('', array_map(fn($x) => '<option' . (($p['era'] ?? '') === $x ? ' selected' : '') . '>' . $x . '</option>', ERAS)) . '</select></div>'
+        . '<div><label class="block text-sm font-medium text-gray-700">Fabric &amp; care (optional)</label><input name="fabric" maxlength="200" value="' . e($p['fabric'] ?? '') . '" placeholder="100% cotton · hand wash" class="' . ADMIN_INPUT . '"></div>'
+        . '<div><label class="block text-sm font-medium text-gray-700">Fit notes (optional)</label><input name="fit" maxlength="200" value="' . e($p['fit'] ?? '') . '" placeholder="Runs small — size up" class="' . ADMIN_INPUT . '"></div>'
+        . '<div><label class="block text-sm font-medium text-gray-700">Model info (optional)</label><input name="modelInfo" maxlength="200" value="' . e($p['modelInfo'] ?? '') . '" placeholder="Model is 5\'7&quot;, wearing M" class="' . ADMIN_INPUT . '"></div>'
+        . '<div><label class="block text-sm font-medium text-gray-700">What you paid (₦, private)</label><input name="costNaira" type="number" min="0" value="' . e((string) ((int) ($p['cost'] ?? 0) / 100 ?: '')) . '" placeholder="For profit tracking" class="' . ADMIN_INPUT . '"></div>'
+        . '<div class="flex flex-wrap items-end gap-4 pb-2">' . implode('', array_map(fn($k, $l) => '<label class="flex items-center gap-2 text-sm"><input type="checkbox" name="tag_' . $k . '"' . (in_array($k, explode(',', (string) ($p['tags'] ?? '')), true) ? ' checked' : '') . '> ' . $l . '</label>', array_keys(PRODUCT_TAGS), PRODUCT_TAGS)) . '</div>'
         . '<div class="sm:col-span-2"><label class="block text-sm font-medium text-gray-700">Measurements (optional)</label><textarea name="measurements" rows="2" maxlength="500" placeholder="Chest 52cm · Length 70cm · Waist 38cm" class="' . ADMIN_INPUT . '">' . e($p['measurements'] ?? '') . '</textarea></div>'
         . '<div class="sm:col-span-2"><label class="block text-sm font-medium text-gray-700">Flaws / wear notes (optional)</label><textarea name="flaws" rows="2" maxlength="1000" placeholder="Small mark on left sleeve (see photo 3)" class="' . ADMIN_INPUT . '">' . e($p['flaws'] ?? '') . '</textarea><p class="mt-1 text-xs text-gray-500">Add close-up photos of any flaws in Extra photos below — honest listings get fewer returns.</p></div>'
         . image_field('imageUrl', 'Cover photo', $p['imageUrl'] ?? '')
@@ -252,9 +291,9 @@ function admin_product_form(?array $p = null): void
         . '<label class="flex items-center gap-2 text-sm"><input name="featured" type="checkbox"' . $checked((bool) ($p['featured'] ?? false)) . '> Featured drop</label>'
         . '<label class="flex items-center gap-2 text-sm"><input name="inStock" type="checkbox"' . $checked((bool) ($p['inStock'] ?? true)) . '> In stock</label>'
         . '</div><p id="form-error" class="hidden text-sm text-red-600"></p>'
-        . '<div class="flex gap-3"><button type="submit" class="' . btn_class() . '">' . ($p ? 'Update product' : 'Add product') . '</button>'
+        . '<div class="flex gap-3"><button type="submit" class="' . btn_class() . '">' . ($isEdit ? 'Update product' : 'Add product') . '</button>'
         . '<a href="/admin/products" class="' . btn_class('outline') . '">Cancel</a></div></form>';
-    render_admin($content, $p ? 'Edit product' : 'Add product');
+    render_admin($content, $isEdit ? 'Edit product' : 'Add product');
 }
 
 function admin_edit_product(string $id): void
@@ -284,6 +323,9 @@ function admin_orders_page(): void
         $extra = '';
         if ($o['deliveryFee']) $extra .= '<li class="text-gray-500">Delivery — ' . naira($o['deliveryFee']) . '</li>';
         if ($o['discountAmount']) $extra .= '<li class="text-gray-500">Discount ' . e($o['discountCode']) . ' — −' . naira($o['discountAmount']) . '</li>';
+        if ($o['giftWrap']) $extra .= '<li class="text-gray-500">🎁 Gift wrap — ' . naira($o['giftWrapFee']) . '</li>';
+        if ($o['notes'] !== '') $extra .= '<li class="rounded bg-yellow-50 px-2 py-1 text-gray-700">Note: ' . e($o['notes']) . '</li>';
+        if ($o['deliveryMethod'] === 'pickup') $extra .= '<li class="font-medium text-blue-700">Customer will pick up</li>';
 
         $actions = '';
         $btn = fn(string $action, string $label, string $cls = 'border-gray-300 hover:bg-gray-50', string $value = '') => '<button type="button" data-order-action="' . $action . '" data-value="' . e($value) . '" data-order="' . e($o['id']) . '" class="rounded-lg border px-3 py-1.5 text-xs font-medium ' . $cls . '">' . e($label) . '</button>';
@@ -294,7 +336,8 @@ function admin_orders_page(): void
             $actions .= '<label class="flex items-center gap-2 text-xs text-gray-600">Delivery<select data-fulfillment="' . e($o['id']) . '" class="rounded-lg border border-gray-300 px-2 py-1 text-xs">' . $opts . '</select></label>';
         }
         if (!in_array($o['status'], ['cancelled', 'failed'], true)) $actions .= $btn('cancel', $o['status'] === 'paid' ? 'Cancel & restock' : 'Cancel', 'border-red-300 text-red-700 hover:bg-red-50');
-        $wa = '<a href="' . e(whatsapp_link($o['customerPhone'])) . '" target="_blank" rel="noopener noreferrer" class="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium hover:bg-gray-50">WhatsApp customer</a>';
+        $wa = '<a href="/admin/orders/' . e($o['id']) . '/slip" target="_blank" class="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium hover:bg-gray-50">Packing slip</a>'
+            . '<a href="' . e(whatsapp_link($o['customerPhone'])) . '" target="_blank" rel="noopener noreferrer" class="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium hover:bg-gray-50">WhatsApp customer</a>';
 
         $cards .= '<div class="rounded-xl border border-gray-200 bg-white p-5" data-order-card="' . e($o['id']) . '"><div class="flex flex-wrap items-start justify-between gap-2">'
             . '<div><p class="font-semibold">' . e($o['customerName']) . '</p><p class="text-sm text-gray-500">' . e($o['reference']) . ' · ' . date('j M Y, g:ia', (int) ($o['createdAt'] / 1000)) . '</p>'
@@ -343,7 +386,18 @@ function admin_settings_page(): void
         . '<div><label class="text-sm font-medium">Other states (₦)</label><input name="deliveryOther" type="number" min="0" value="' . (int) $s['deliveryOther'] . '" class="' . ADMIN_INPUT . '"></div>'
         . '<div><label class="text-sm font-medium">Free delivery over (₦, 0 = never)</label><input name="freeDeliveryOver" type="number" min="0" value="' . (int) $s['freeDeliveryOver'] . '" class="' . ADMIN_INPUT . '"></div></div>'
         . '<div><label class="text-sm font-medium">Bank transfer details</label><textarea name="bankDetails" rows="3" maxlength="600" placeholder="Bank: GTBank&#10;Account name: T.K Collectibles&#10;Account number: 0123456789" class="' . ADMIN_INPUT . '">' . e($s['bankDetails']) . '</textarea><p class="mt-1 text-xs text-gray-500">Leave empty to hide the bank transfer option at checkout.</p></div>'
-        . '<label class="flex items-center gap-2 text-sm"><input type="checkbox" name="payOnDelivery" value="1"' . ($s['payOnDelivery'] ? ' checked' : '') . '> Offer pay on delivery</label></section>'
+        . '<label class="flex items-center gap-2 text-sm"><input type="checkbox" name="payOnDelivery" value="1"' . ($s['payOnDelivery'] ? ' checked' : '') . '> Offer pay on delivery</label>'
+        . '<label class="flex items-center gap-2 text-sm"><input type="checkbox" name="pickupEnabled" value="1"' . ($s['pickupEnabled'] ? ' checked' : '') . '> Offer free pickup</label>'
+        . '<div class="grid gap-4 sm:grid-cols-2"><div><label class="text-sm font-medium">Pickup address</label><input name="pickupAddress" maxlength="300" value="' . e($s['pickupAddress']) . '" class="' . ADMIN_INPUT . '"></div>'
+        . '<div><label class="text-sm font-medium">Gift wrap price (₦, 0 = off)</label><input name="giftWrapPrice" type="number" min="0" value="' . (int) $s['giftWrapPrice'] . '" class="' . ADMIN_INPUT . '"></div></div>'
+        . '<label class="flex items-center gap-2 text-sm"><input type="checkbox" name="offersEnabled" value="1"' . ($s['offersEnabled'] ? ' checked' : '') . '> Let shoppers make offers</label></section>'
+        . '<section class="space-y-4"><h2 class="text-lg font-semibold text-gray-900">Policies &amp; size guide</h2><p class="text-sm text-gray-500">Leave a box empty to use our standard wording. Lines starting with • become bullet points; lines with | become a table.</p>'
+        . implode('', array_map(fn($k, $l) => '<div><label class="text-sm font-medium">' . $l . '</label><textarea name="' . $k . '" rows="6" maxlength="6000" placeholder="' . e(DEFAULT_POLICIES[$k]) . '" class="' . ADMIN_INPUT . '">' . e($s[$k]) . '</textarea></div>',
+            ['returnsPolicy', 'termsText', 'privacyText', 'sizeGuide'], ['Returns &amp; refunds', 'Terms of sale', 'Privacy policy', 'Size guide']))
+        . '</section>'
+        . '<section class="space-y-4"><h2 class="text-lg font-semibold text-gray-900">Analytics</h2><div class="grid gap-4 sm:grid-cols-2">'
+        . '<div><label class="text-sm font-medium">Google Analytics ID</label><input name="gaId" maxlength="40" value="' . e($s['gaId']) . '" placeholder="G-XXXXXXXXXX" class="' . ADMIN_INPUT . '"></div>'
+        . '<div><label class="text-sm font-medium">Meta (Facebook) Pixel ID</label><input name="metaPixelId" maxlength="40" value="' . e($s['metaPixelId']) . '" placeholder="123456789012345" class="' . ADMIN_INPUT . '"></div></div></section>'
         . '<section class="space-y-4"><h2 class="text-lg font-semibold text-gray-900">Color palette</h2><p class="text-sm text-gray-500">These colors apply across the entire storefront.</p>'
         . '<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">' . $colorHtml . '</div>'
         . '<div class="rounded-lg border border-gray-200 bg-gray-50 p-4"><p class="text-sm font-medium text-gray-900">Readability check</p>'

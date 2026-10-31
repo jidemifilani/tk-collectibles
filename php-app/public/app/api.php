@@ -49,6 +49,12 @@ function validate_product(?array $d): array
         'measurements' => str_field($d, 'measurements', 500, false),
         'flaws' => str_field($d, 'flaws', 1000, false),
         'publishAt' => parse_publish_at($d['publishAt'] ?? null),
+        'fit' => str_field($d, 'fit', 200, false),
+        'fabric' => str_field($d, 'fabric', 200, false),
+        'modelInfo' => str_field($d, 'modelInfo', 200, false),
+        'era' => str_field($d, 'era', 40, false),
+        'tags' => implode(',', array_values(array_intersect(array_map('trim', explode(',', strtolower((string) ($d['tags'] ?? '')))), array_keys(PRODUCT_TAGS)))),
+        'cost' => max(0, min(MAX_ITEM_PRICE_NAIRA, (int) ($d['costNaira'] ?? 0))) * 100,
     ];
 }
 
@@ -112,6 +118,11 @@ function handle_api(string $path, string $method): void
             ['PUT', '#^/api/admin/reviews/([^/]+)$#', 'api_admin_update_review'],
             ['DELETE', '#^/api/admin/reviews/([^/]+)$#', 'api_admin_delete_review'],
             ['POST', '#^/api/admin/2fa/start$#', 'api_admin_2fa_start'],
+            ['POST', '#^/api/offers$#', 'api_offer_submit'],
+            ['POST', '#^/api/sell$#', 'api_sell_submit'],
+            ['PUT', '#^/api/admin/offers/([^/]+)$#', 'api_admin_offer_decide'],
+            ['PUT', '#^/api/admin/sell/([^/]+)$#', 'api_admin_sell_status'],
+            ['POST', '#^/api/admin/price-drop$#', 'api_admin_price_drop'],
             ['POST', '#^/api/admin/2fa/enable$#', 'api_admin_2fa_enable'],
             ['POST', '#^/api/admin/2fa/disable$#', 'api_admin_2fa_disable'],
         ];
@@ -265,6 +276,14 @@ function read_checkout(?array $d): array
     $method = (string) ($d['paymentMethod'] ?? 'paystack');
     $s = settings();
     if (!isset(PAYMENT_LABELS[$method])) throw new InvalidArgumentException('Choose a payment method');
+    $pickup = ($d['deliveryMethod'] ?? '') === 'pickup';
+    if ($pickup && !$s['pickupEnabled']) throw new InvalidArgumentException('Pickup is not available');
+    if ($pickup) {
+        // Pickup orders don't need a delivery address.
+        foreach (['shippingAddress' => 'Pickup: ' . ($s['pickupAddress'] ?: $s['contactAddress']), 'city' => 'Pickup', 'state' => 'Pickup'] as $k => $v) {
+            if (trim((string) ($d[$k] ?? '')) === '') $d[$k] = $v;
+        }
+    }
     if ($method === 'transfer' && trim($s['bankDetails']) === '') throw new InvalidArgumentException('Bank transfer is not available');
     if ($method === 'pod' && !$s['payOnDelivery']) throw new InvalidArgumentException('Pay on delivery is not available');
     return [
@@ -275,6 +294,9 @@ function read_checkout(?array $d): array
         'state' => str_field($d, 'state', 100, true, 'State'),
         'code' => mb_substr(trim((string) ($d['discountCode'] ?? '')), 0, 40),
         'method' => $method, 'items' => $items,
+        'notes' => str_field($d, 'notes', 500, false, 'Order note'),
+        'giftWrap' => !empty($d['giftWrap']),
+        'pickup' => $pickup,
     ];
 }
 
@@ -289,17 +311,21 @@ function api_checkout_quote(): void
         $subtotal += (int) $st->fetchColumn() * max(1, min(20, (int) ($i['quantity'] ?? 1)));
     }
     $state = (string) ($d['state'] ?? '');
-    $delivery = $state === '' ? null : delivery_fee($state, $subtotal);
+    $s = settings();
+    $pickup = ($d['deliveryMethod'] ?? '') === 'pickup' && $s['pickupEnabled'];
+    $delivery = $pickup ? 0 : ($state === '' ? null : delivery_fee($state, $subtotal));
+    $wrap = !empty($d['giftWrap']) ? (int) $s['giftWrapPrice'] * 100 : 0;
+    $ids = array_map(fn($i) => (string) ($i['productId'] ?? ''), (array) ($d['items'] ?? []));
     $discount = 0;
     $code = null;
     $codeError = null;
     try {
-        [$discount, $code] = apply_discount((string) ($d['discountCode'] ?? ''), $subtotal);
+        [$discount, $code] = apply_discount((string) ($d['discountCode'] ?? ''), $subtotal, $ids);
     } catch (InvalidArgumentException $ex) {
         $codeError = $ex->getMessage();
     }
     json_out(['subtotal' => $subtotal, 'delivery' => $delivery, 'discount' => $discount, 'code' => $code,
-        'codeError' => $codeError, 'total' => $subtotal + (int) $delivery - $discount]);
+        'codeError' => $codeError, 'giftWrap' => $wrap, 'total' => $subtotal + (int) $delivery + $wrap - $discount]);
 }
 
 /**
@@ -330,17 +356,21 @@ function create_order(array $c, ?string $idem): array
             $subtotal += (int) $p['salePrice'] * $item['quantity'];
             $lines[] = [new_id(), $orderId, $p['id'], $item['quantity'], (int) $p['salePrice'], $item['size']];
         }
-        [$discount, $code] = apply_discount($c['code'], $subtotal);
-        $delivery = delivery_fee($c['state'], $subtotal);
-        $total = $subtotal - $discount + $delivery;
+        [$discount, $code] = apply_discount($c['code'], $subtotal, array_column($c['items'], 'productId'));
+        $delivery = $c['pickup'] ? 0 : delivery_fee($c['state'], $subtotal);
+        $wrap = $c['giftWrap'] ? (int) settings()['giftWrapPrice'] * 100 : 0;
+        $total = $subtotal - $discount + $delivery + $wrap;
         if ($total < 10000) throw new InvalidArgumentException('Minimum order amount is ₦100');
         $status = $c['method'] === 'paystack' ? 'pending' : 'awaiting';
 
-        $pdo->prepare('INSERT INTO "Order" (id, reference, idempotencyKey, customerName, customerEmail, customerPhone, shippingAddress, city, state, totalAmount, status, createdAt, updatedAt, deliveryFee, discountAmount, discountCode, paymentMethod) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-            ->execute([$orderId, $reference, $idem, $c['name'], $c['email'], $c['phone'], $c['address'], $c['city'], $c['state'], $total, $status, $now, $now, $delivery, $discount, $code, $c['method']]);
+        $pdo->prepare('INSERT INTO "Order" (id, reference, idempotencyKey, customerName, customerEmail, customerPhone, shippingAddress, city, state, totalAmount, status, createdAt, updatedAt, deliveryFee, discountAmount, discountCode, paymentMethod, notes, giftWrap, giftWrapFee, deliveryMethod) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+            ->execute([$orderId, $reference, $idem, $c['name'], $c['email'], $c['phone'], $c['address'], $c['city'], $c['state'], $total, $status, $now, $now, $delivery, $discount, $code, $c['method'], $c['notes'], $c['giftWrap'] ? 1 : 0, $wrap, $c['pickup'] ? 'pickup' : 'delivery']);
         $ins = $pdo->prepare('INSERT INTO OrderItem (id, orderId, productId, quantity, price, size) VALUES (?,?,?,?,?,?)');
         foreach ($lines as $l) $ins->execute($l);
-        if ($code) $pdo->prepare('UPDATE DiscountCode SET uses = uses + 1 WHERE code = ?')->execute([$code]);
+        if ($code) {
+            $pdo->prepare('UPDATE DiscountCode SET uses = uses + 1 WHERE code = ?')->execute([$code]);
+            $pdo->prepare("UPDATE Offer SET status = 'used' WHERE code = ?")->execute([$code]);
+        }
         $pdo->exec('COMMIT');
     } catch (Throwable $ex) {
         $pdo->exec('ROLLBACK');
@@ -414,6 +444,10 @@ function order_with_items(string $where, array $params): ?array
     $o['totalAmount'] = (int) $o['totalAmount'];
     $o['deliveryFee'] = (int) ($o['deliveryFee'] ?? 0);
     $o['discountAmount'] = (int) ($o['discountAmount'] ?? 0);
+    $o['giftWrap'] = (bool) ($o['giftWrap'] ?? 0);
+    $o['giftWrapFee'] = (int) ($o['giftWrapFee'] ?? 0);
+    $o['notes'] = (string) ($o['notes'] ?? '');
+    $o['deliveryMethod'] = (string) ($o['deliveryMethod'] ?? 'delivery');
     $o['items'] = array_map(fn($i) => [
         'id' => $i['id'], 'productId' => $i['productId'], 'quantity' => (int) $i['quantity'],
         'price' => (int) $i['price'], 'size' => $i['size'],
@@ -662,7 +696,9 @@ function api_admin_update_settings(): void
         'heroSubtitle' => [600, false], 'heroImageUrl' => [2000, false], 'aboutTitle' => [300, false], 'aboutText' => [4000, false],
         'contactEmail' => [200, false], 'contactAddress' => [300, false], 'customerCarePhone' => [60, true],
         'customerCareHours' => [100, false], 'instagramUrl' => [500, false], 'tiktokUrl' => [500, false], 'whatsappNumber' => [60, false],
-        'bankDetails' => [600, false],
+        'bankDetails' => [600, false], 'pickupAddress' => [300, false], 'returnsPolicy' => [6000, false],
+        'termsText' => [6000, false], 'privacyText' => [6000, false], 'sizeGuide' => [6000, false],
+        'gaId' => [40, false], 'metaPixelId' => [40, false],
     ];
     $data = [];
     foreach ($limits as $k => [$max, $req]) $data[$k] = str_field($d, $k, $max, $req);
@@ -675,6 +711,11 @@ function api_admin_update_settings(): void
         $data[$k] = (int) $v;
     }
     $data['payOnDelivery'] = !empty($d['payOnDelivery']) && $d['payOnDelivery'] !== 'false' ? 1 : 0;
+    $data['pickupEnabled'] = !empty($d['pickupEnabled']) && $d['pickupEnabled'] !== 'false' ? 1 : 0;
+    $data['offersEnabled'] = !empty($d['offersEnabled']) && $d['offersEnabled'] !== 'false' ? 1 : 0;
+    $data['giftWrapPrice'] = max(0, min(100000, (int) ($d['giftWrapPrice'] ?? 0)));
+    if ($data['gaId'] !== '' && !preg_match('/^G-[A-Z0-9]{4,20}$/', $data['gaId'])) throw new InvalidArgumentException('Google Analytics ID looks like G-XXXXXXX');
+    if ($data['metaPixelId'] !== '' && !preg_match('/^\d{6,20}$/', $data['metaPixelId'])) throw new InvalidArgumentException('Meta Pixel ID is a number');
     foreach (['colorCream', 'colorSand', 'colorTerracotta', 'colorRust', 'colorOlive', 'colorCharcoal', 'colorWarmgray'] as $k) {
         $v = trim((string) ($d[$k] ?? ''));
         if (!preg_match('/^#[0-9a-fA-F]{6}$/', $v)) throw new InvalidArgumentException('Colors must be hex values like #7A1F2B');
@@ -1027,4 +1068,126 @@ function api_admin_2fa_disable(): void
     meta_set('totp_secret', null);
     admin_log('2fa_disable', '2-step login turned off');
     json_out(['ok' => true]);
+}
+
+// ---------- offers ("make an offer") ----------
+
+function api_offer_submit(): void
+{
+    [$ok] = rate_limit('offer:' . client_ip(), 5, 3600);
+    if (!$ok) json_out(['error' => 'Too many offers. Please try again later.'], 429);
+    if (!settings()['offersEnabled']) json_out(['error' => 'Offers are turned off'], 400);
+    $d = json_body() ?? [];
+    $st = db()->prepare('SELECT * FROM Product WHERE id = ?');
+    $st->execute([(string) ($d['productId'] ?? '')]);
+    $p = $st->fetch();
+    if (!$p || product_availability($p) !== 'available') throw new InvalidArgumentException('This piece is no longer available');
+    $email = strtolower(trim((string) ($d['email'] ?? '')));
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) throw new InvalidArgumentException('Enter a valid email');
+    $amount = (int) round((float) ($d['amount'] ?? 0)) * 100;
+    if ($amount <= 0 || $amount >= (int) $p['salePrice']) throw new InvalidArgumentException('Your offer must be below ' . naira((int) $p['salePrice']));
+    if ($amount < (int) $p['salePrice'] * 0.5) throw new InvalidArgumentException('Offers below half the price are not accepted');
+    $o = [new_id(), $p['id'], str_field($d, 'name', 80), $email, str_field($d, 'phone', 30), $amount, now_ms()];
+    db()->prepare('INSERT INTO Offer (id, productId, name, email, phone, amount, createdAt) VALUES (?,?,?,?,?,?,?)')->execute($o);
+    respond_then_continue(['ok' => true, 'message' => "Offer sent! We'll email you within 24 hours."]);
+    telegram_alert('💬 Offer: ' . naira($amount) . ' for ' . $p['name'] . ' (listed ' . naira((int) $p['salePrice']) . ') from ' . $o[2] . ' · ' . $o[4]);
+    $s = settings();
+    if (filter_var($s['contactEmail'], FILTER_VALIDATE_EMAIL)) {
+        send_mail($s['contactEmail'], 'New offer: ' . naira($amount) . ' for ' . $p['name'], '<p>' . e($o[2]) . ' (' . e($email) . ', ' . e($o[4]) . ') offered <strong>' . naira($amount) . '</strong> for ' . e($p['name']) . ' (listed at ' . naira((int) $p['salePrice']) . ').</p><p><a href="' . e(app_url() . admin_base() . '/offers') . '">Accept or decline</a></p>');
+    }
+    exit;
+}
+
+/** Accepting creates a single-use code, valid 48 hours, that only works for that piece. */
+function api_admin_offer_decide(string $id): void
+{
+    require_admin(true);
+    $st = db()->prepare('SELECT o.*, p.name AS productName, p.slug, p.salePrice FROM Offer o JOIN Product p ON p.id = o.productId WHERE o.id = ?');
+    $st->execute([$id]);
+    $o = $st->fetch();
+    if (!$o) json_out(['error' => 'Not found'], 404);
+    if ($o['status'] !== 'new') throw new InvalidArgumentException('This offer was already answered');
+    $accept = (json_body()['action'] ?? '') === 'accept';
+    $url = app_url() . '/product/' . rawurlencode($o['slug']);
+    if ($accept) {
+        $code = 'OFFER' . strtoupper(bin2hex(random_bytes(3)));
+        $off = max(1, intdiv((int) $o['salePrice'] - (int) $o['amount'], 100));
+        db()->prepare('INSERT INTO DiscountCode (code, kind, value, minOrder, maxUses, uses, expiresAt, active, createdAt, productId) VALUES (?,?,?,0,1,0,?,1,?,?)')
+            ->execute([$code, 'fixed', $off, now_ms() + 48 * 3600 * 1000, now_ms(), $o['productId']]);
+        db()->prepare("UPDATE Offer SET status = 'accepted', code = ? WHERE id = ?")->execute([$code, $id]);
+        admin_log('offer_accept', $o['productName'] . ' at ' . naira((int) $o['amount']));
+        respond_then_continue(['ok' => true, 'code' => $code]);
+        send_mail($o['email'], 'Your offer was accepted! 🎉', '<p>Hi ' . e($o['name']) . ', good news — we accepted your offer of <strong>' . naira((int) $o['amount']) . '</strong> for ' . e($o['productName']) . '.</p>'
+            . '<p>Use code <strong style="font-size:18px">' . $code . '</strong> at checkout within 48 hours. The piece is first come, first served until you pay.</p><p><a href="' . e($url) . '">Buy it now</a></p>');
+    } else {
+        db()->prepare("UPDATE Offer SET status = 'declined' WHERE id = ?")->execute([$id]);
+        admin_log('offer_decline', $o['productName']);
+        respond_then_continue(['ok' => true]);
+        send_mail($o['email'], 'About your offer', '<p>Hi ' . e($o['name']) . ', thanks for your offer on ' . e($o['productName']) . '. We can\'t accept it this time, but it\'s still available at ' . naira((int) $o['salePrice']) . '.</p><p><a href="' . e($url) . '">View it</a></p>');
+    }
+    exit;
+}
+
+// ---------- "Sell to TK" requests ----------
+
+function api_sell_submit(): void
+{
+    [$ok] = rate_limit('sell:' . client_ip(), 3, 3600);
+    if (!$ok) json_out(['error' => 'Too many requests. Please try again later.'], 429);
+    $d = $_POST;
+    $name = str_field($d, 'name', 80);
+    $phone = str_field($d, 'phone', 30);
+    $email = strtolower(trim((string) ($d['email'] ?? '')));
+    if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) throw new InvalidArgumentException('Enter a valid email');
+    $desc = str_field($d, 'description', 2000, true, 'Description');
+    $photos = [];
+    $files = $_FILES['photos'] ?? null;
+    if ($files && is_array($files['name'])) {
+        $dir = dirname(__DIR__) . '/uploads/sell';
+        if (!is_dir($dir)) mkdir($dir, 0755, true);
+        for ($i = 0; $i < min(4, count($files['name'])); $i++) {
+            if ($files['error'][$i] !== UPLOAD_ERR_OK || $files['size'][$i] > 5 * 1024 * 1024) continue;
+            $info = @getimagesize($files['tmp_name'][$i]);
+            if (!$info || !in_array($info[2], [IMAGETYPE_JPEG, IMAGETYPE_PNG, IMAGETYPE_WEBP], true)) continue;
+            // Always re-encode: strips anything hidden in the file.
+            $name2 = time() . '-' . bin2hex(random_bytes(6)) . '.jpg';
+            save_resized_image($files['tmp_name'][$i], $info, "$dir/$name2", 1200, 1200, 'jpg');
+            $photos[] = '/uploads/sell/' . $name2;
+        }
+    }
+    db()->prepare('INSERT INTO SellRequest (id, name, phone, email, description, askingPrice, photos, createdAt) VALUES (?,?,?,?,?,?,?,?)')
+        ->execute([new_id(), $name, $phone, $email, $desc, max(0, (int) ($d['askingPrice'] ?? 0)) * 100, json_encode($photos), now_ms()]);
+    respond_then_continue(['ok' => true, 'message' => "Thanks! We'll review your pieces and reply on WhatsApp within 2 days."]);
+    telegram_alert('👗 Sell request from ' . $name . ' · ' . $phone . "\n" . mb_substr($desc, 0, 300));
+    exit;
+}
+
+function api_admin_sell_status(string $id): void
+{
+    require_admin(true);
+    $status = (string) (json_body()['status'] ?? '');
+    if (!in_array($status, ['new', 'contacted', 'bought', 'declined'], true)) throw new InvalidArgumentException('Unknown status');
+    db()->prepare('UPDATE SellRequest SET status = ? WHERE id = ?')->execute([$status, $id]);
+    admin_log('sell_status', $id . ' → ' . $status);
+    json_out(['ok' => true]);
+}
+
+// ---------- bulk price drop ----------
+
+function api_admin_price_drop(): void
+{
+    require_admin(true);
+    $d = json_body() ?? [];
+    $pct = (int) ($d['percent'] ?? 0);
+    if ($pct < 1 || $pct > 80) throw new InvalidArgumentException('Percent must be between 1 and 80');
+    $days = max(0, (int) ($d['olderThanDays'] ?? 0));
+    $where = 'inStock = 1 AND ' . published_sql() . ' AND createdAt < ?';
+    $params = [now_ms() - $days * 86400 * 1000];
+    $cat = (string) ($d['category'] ?? '');
+    if ($cat !== '' && isset(CATEGORIES[$cat]) && $cat !== 'all') { $where .= ' AND category = ?'; $params[] = $cat; }
+    // Round to the nearest ₦100; never below ₦100.
+    $st = db()->prepare("UPDATE Product SET salePrice = MAX(10000, CAST(ROUND(salePrice * (100 - ?) / 100.0 / 10000.0) AS INTEGER) * 10000) WHERE $where");
+    $st->execute([$pct, ...$params]);
+    admin_log('price_drop', "-$pct% on " . $st->rowCount() . ' items');
+    json_out(['ok' => true, 'updated' => $st->rowCount()]);
 }

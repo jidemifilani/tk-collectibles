@@ -3,7 +3,7 @@
 
 declare(strict_types=1);
 
-const ASSET_VERSION = '2';
+const ASSET_VERSION = '3';
 
 require __DIR__ . '/app/bootstrap.php';
 require __DIR__ . '/app/icons.php';
@@ -21,7 +21,7 @@ header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: strict-origin-when-cross-origin');
 header('X-Frame-Options: SAMEORIGIN');
 header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
-header("Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'");
+header("Content-Security-Policy: default-src 'self'; script-src 'self' https://www.googletagmanager.com https://connect.facebook.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com https://www.facebook.com; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'");
 
 // Hidden admin address: with ADMIN_PATH set, /admin is a 404 and the secret path serves the panel.
 $adminBase = admin_base();
@@ -68,6 +68,9 @@ try {
             $path === '/admin/reviews' => admin_reviews_page(),
             $path === '/admin/activity' => admin_activity_page(),
             $path === '/admin/security' => admin_security_page(),
+            $path === '/admin/offers' => admin_offers_page(),
+            $path === '/admin/sell' => admin_sell_page(),
+            (bool) preg_match('#^/admin/orders/([^/]+)/slip$#', $path, $m) => admin_packing_slip($m[1]),
             (bool) preg_match('#^/admin/products/([^/]+)$#', $path, $m) => admin_edit_product($m[1]),
             $path === '/admin/orders' => admin_orders_page(),
             $path === '/admin/settings' => admin_settings_page(),
@@ -91,15 +94,21 @@ try {
         $path === '/sitemap.xml' => sitemap_xml(),
         $path === '/robots.txt' => robots_txt(),
         $path === '/feed/products.csv' => product_feed_csv(),
+        $path === '/returns' => page_policy('returnsPolicy', 'Returns & refunds'),
+        $path === '/terms' => page_policy('termsText', 'Terms of sale'),
+        $path === '/privacy' => page_policy('privacyText', 'Privacy policy'),
+        $path === '/size-guide' => page_policy('sizeGuide', 'Size guide'),
+        $path === '/sell' => page_sell(),
         default => not_found_page(),
     };
 
     // Scheduled drops: the first page view after go-live sends the alerts, after the page is delivered.
-    if ($method === 'GET' && has_due_drops()) {
+    if ($method === 'GET') {
         if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
         ignore_user_abort(true);
         set_time_limit(120);
-        announce_due_drops();
+        if (has_due_drops()) announce_due_drops();
+        run_maintenance();
     }
 } catch (Throwable $ex) {
     log_error('Page error ' . $path, $ex->getMessage() . ' @ ' . $ex->getFile() . ':' . $ex->getLine());

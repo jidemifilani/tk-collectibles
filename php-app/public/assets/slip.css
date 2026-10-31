@@ -1,0 +1,12 @@
+body{font-family:Arial,sans-serif;color:#111;max-width:720px;margin:24px auto;padding:0 16px;background:#fff}
+section{border:1px solid #ccc;border-radius:8px;padding:16px;margin-bottom:16px}
+.label{border:2px dashed #111}
+.big{font-size:20px;font-weight:bold;margin:4px 0}
+.small{font-size:11px;color:#555;margin:4px 0}
+.tag{display:inline-block;border:2px solid #111;padding:4px 8px;font-weight:bold;margin:8px 8px 0 0}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{border-bottom:1px solid #ddd;padding:6px;text-align:left}
+.r{text-align:right}
+.note{background:#fff7d6;padding:8px;border-radius:4px}
+button{padding:8px 16px;margin-bottom:12px;cursor:pointer}
+@media print{.noprint{display:none}body{margin:0}}
