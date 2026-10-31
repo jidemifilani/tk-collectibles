@@ -1,0 +1,14 @@
+// Startup file for cPanel "Setup Node.js App" (Phusion Passenger).
+// Passenger sets PORT; locally `npm start` is still the normal way to run.
+const { createServer } = require("http");
+const next = require("next");
+
+const port = parseInt(process.env.PORT || "3000", 10);
+const app = next({ dev: false, dir: __dirname });
+const handle = app.getRequestHandler();
+
+app.prepare().then(() => {
+  createServer((req, res) => handle(req, res)).listen(port, () => {
+    console.log(`T.K Collectibles running on port ${port}`);
+  });
+});

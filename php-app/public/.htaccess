@@ -1,0 +1,34 @@
+Options -Indexes
+DirectoryIndex index.php
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+
+  # Always use HTTPS (phone notifications and Paystack need it).
+  RewriteCond %{HTTPS} !=on
+  RewriteCond %{HTTP:X-Forwarded-Proto} !https
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+  # Never serve the PHP source folder directly.
+  RewriteRule ^app(/|$) - [F,L]
+
+  # Real files (CSS, JS, images, uploads) are served as-is; everything else goes to index.php.
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteRule ^ index.php [L,QSA]
+</IfModule>
+
+# Uploaded images must never run as code.
+<IfModule mod_headers.c>
+  <FilesMatch "\.(css|js|png|jpe?g|webp|gif|svg|woff2?)$">
+    Header set Cache-Control "public, max-age=604800"
+  </FilesMatch>
+  <Files "sw.js">
+    Header set Cache-Control "no-cache"
+  </Files>
+</IfModule>
+
+# Allow product photo uploads up to 5MB.
+<IfModule mod_php.c>
+  php_value upload_max_filesize 6M
+  php_value post_max_size 8M
+</IfModule>

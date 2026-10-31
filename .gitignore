@@ -38,3 +38,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# production build copy
+/.next-prod/
+
+# PHP store secrets + database
+/php-app/data/
+/php-app/public/uploads/*
+!/php-app/public/uploads/.htaccess

@@ -1,0 +1,22 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-cream: 246 237 232;
+  --color-sand: 235 221 213;
+  --color-terracotta: 122 31 43;
+  --color-rust: 94 22 32;
+  --color-olive: 92 107 74;
+  --color-charcoal: 44 40 37;
+  --color-warmgray: 107 101 96;
+}
+
+@layer base {
+  html { scroll-behavior: smooth; }
+  body { @apply bg-cream text-charcoal antialiased; }
+}
+
+@layer utilities {
+  .text-balance { text-wrap: balance; }
+}
